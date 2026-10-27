@@ -88,6 +88,22 @@ class SlidingRateLimiter:
             dq.append(now)
             return True
 
+    def usage(self, key: str) -> int:
+        now = time.time()
+        with self._lock:
+            dq = self._hits.get(key)
+            if not dq:
+                return 0
+            cutoff = now - self.window
+            while dq and dq[0] < cutoff:
+                dq.popleft()
+            return len(dq)
+
+    def remaining(self, key: str):
+        if not self.limit or self.limit <= 0:
+            return None
+        return max(0, self.limit - self.usage(key))
+
 
 def validate_upstream_url(url: str, block_private: bool = False) -> str:
     """Return a normalized base URL or raise ValueError."""

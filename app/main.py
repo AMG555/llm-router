@@ -345,10 +345,19 @@ async def admin_egress(check: int = 0, _=Depends(admin_auth)):
         "global_proxy": util.mask_proxy(settings.egress_proxy),
         "global_proxy_set": bool(settings.egress_proxy),
         "trust_env": not bool(settings.egress_proxy),
+        "egress_rpm": settings.egress_ip_rpm,
         "local_ip": _local_ip(),
         "providers": {p["name"]: util.mask_proxy(p.get("proxy") or "")
                       for p in store.providers.values() if p.get("proxy")},
     }
+    egress_ids = {"default"}
+    if settings.egress_proxy:
+        egress_ids.add(settings.egress_proxy)
+    for p in store.providers.values():
+        if p.get("proxy"):
+            egress_ids.add(p["proxy"])
+    info["usage_1m"] = {(util.mask_proxy(e) if e != "default" else "default"):
+                        router.egress.usage(e) for e in egress_ids}
     if check:
         if not settings.egress_check_url:
             info["check_error"] = "EGRESS_CHECK_URL is not configured"

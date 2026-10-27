@@ -324,11 +324,18 @@ allowlisted** rather than rotating it:
 3. **Pin it per provider.** Give a provider its own `proxy` (console field:
    *Egress proxy*, or `POST /admin/api/providers` with `proxy`). Use this when
    different providers require different allowlisted IPs.
-4. Per-provider proxies are cached per proxy URL, so calls reuse connections.
+4. **Cap the single IP.** Set `EGRESS_IP_RPM` to a value **below** your
+   provider's per-IP limit. The gateway then throttles requests on each egress
+   identity (skipping to a wait/429) so you *stay under* the provider's per-IP
+   limit instead of tripping a ban. `GET /admin/api/egress` reports the current
+   per-egress usage for the last minute.
+5. Per-provider proxies are cached per proxy URL, so calls reuse connections.
 
-> **Note.** This is for allowlisting and compliance. Do **not** rotate source
-> IPs to sidestep a provider's per-IP rate limits — that is evasion and breaches
-> provider terms. The gateway pins an egress identity; it does not cycle one.
+> **Note.** This is for allowlisting, compliance and *staying within* limits.
+> Do **not** rotate source IPs to sidestep a provider's per-IP rate limits —
+> that is evasion, breaches provider terms, and rarely works because providers
+> correlate abuse by account/key, not only by IP. The gateway pins one egress
+> identity and throttles it; it does not cycle IPs.
 
 ---
 

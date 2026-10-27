@@ -35,6 +35,20 @@ def test_rate_limiter_unlimited():
     assert all(lim.allow("k") for _ in range(100))
 
 
+def test_rate_limiter_usage_and_remaining():
+    lim = SlidingRateLimiter(3, window=60)
+    assert lim.usage("k") == 0 and lim.remaining("k") == 3
+    lim.allow("k")
+    lim.allow("k")
+    assert lim.usage("k") == 2 and lim.remaining("k") == 1
+    assert lim.remaining("other") == 3
+    assert ld_unlimited_remaining()
+
+
+def ld_unlimited_remaining():
+    return SlidingRateLimiter(0).remaining("k") is None
+
+
 def test_validate_upstream_url():
     assert validate_upstream_url("https://api.example.com/v1") == "https://api.example.com/v1"
     assert validate_upstream_url("http://host:8080/v1/") == "http://host:8080/v1"

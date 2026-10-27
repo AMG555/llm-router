@@ -71,3 +71,21 @@ def test_egress_endpoint_requires_admin_and_reports(client, admin_h):
     body = r.json()
     assert "local_ip" in body and "providers" in body
     assert body["global_proxy_set"] is False
+    assert "egress_rpm" in body and "usage_1m" in body
+
+
+def test_egress_rate_budget_caps_single_ip(client, gw_h, make_model, app_module):
+    """A per-egress budget throttles instead of tripping the provider's limit."""
+    from app.security import SlidingRateLimiter
+    original = app_module.router.egress
+    try:
+        app_module.router.egress = SlidingRateLimiter(1, window=60)
+        m = make_model([("eb1", "ok", 100), ("eb2", "ok", 100)], sticky=False)
+        body = {"model": m["name"], "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 5}
+        assert client.post("/v1/chat/completions", headers=gw_h, json=body).status_code == 200
+        r2 = client.post("/v1/chat/completions", headers=gw_h, json=body)
+        assert r2.status_code == 429
+        assert r2.json()["error"]["code"] == "no_capacity"
+    finally:
+        app_module.router.egress = original

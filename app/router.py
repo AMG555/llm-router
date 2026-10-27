@@ -9,6 +9,7 @@ import httpx
 
 from . import util
 from .adapters import get_adapter
+from .security import SlidingRateLimiter
 
 
 class NoCapacity(Exception):
@@ -38,6 +39,9 @@ class Router:
         self.bus = bus
         self.swrr = {}
         self._clients = {}
+        # Per-egress-identity rate budget (keeps a single outbound IP under the
+        # provider's per-IP limit instead of rotating to evade it).
+        self.egress = SlidingRateLimiter(self.s.egress_ip_rpm)
         # default client (env proxies honoured unless a global egress proxy is set)
         self.client = self.client_for(None)
 
@@ -70,6 +74,13 @@ class Router:
         for client in list(self._clients.values()):
             await client.aclose()
         self._clients.clear()
+
+    def egress_key(self, cand) -> str:
+        """Identity of the outbound path used for a candidate."""
+        proxy = (cand.get("proxy") or "").strip() or None
+        if proxy is None and self.s.egress_proxy:
+            proxy = self.s.egress_proxy
+        return proxy or "default"
 
     # ---------------- candidate resolution ----------------
     def _cand(self, target, provider, key):
@@ -206,6 +217,12 @@ class Router:
         errors = []
 
         for cand in pool[: self.s.max_attempts]:
+            egress = self.egress_key(cand)
+            if not self.egress.allow(egress):
+                errors.append(f"{cand['provider_name']} egress rate budget reached")
+                self.bus.publish({"kind": "throttle", "provider": cand["provider_name"],
+                                  "key": cand["key_label"], "reason": "egress rpm budget"})
+                continue
             if not self.limiter.acquire(cand):
                 continue
             attempts += 1

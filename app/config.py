@@ -49,6 +49,10 @@ class Settings:
         # allowlisted egress IP). Standard HTTP_PROXY/HTTPS_PROXY are also
         # honoured when this is unset.
         self.egress_proxy = os.getenv("EGRESS_PROXY", "").strip()
+        # Cap upstream requests per minute per egress identity (proxy IP, or
+        # the default egress). Set this BELOW the provider's per-IP limit so
+        # the gateway throttles instead of tripping the limit. 0 = unlimited.
+        self.egress_ip_rpm = int(os.getenv("EGRESS_IP_RPM", "0"))
         # Optional URL returning the caller's public IP (e.g. an IP echo
         # service); used by GET /admin/api/egress?check=1.
         self.egress_check_url = os.getenv("EGRESS_CHECK_URL", "").strip()
