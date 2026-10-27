@@ -8,15 +8,17 @@ services:
     environment:
       PORT: "7860"
       ENV: production
+    # Publish 7860 only for direct/local access. When using the tunnel you can
+    # delete this block so the container is reachable solely via Cloudflare.
     ports:
       - "7860:7860"
     volumes:
       - router-data:/data
 
   # Optional: publish the gateway through Cloudflare Tunnel.
-  # Enable with:  docker compose --profile tunnel up -d
-  # Requires TUNNEL_TOKEN (Cloudflare Zero Trust -> Networks -> Tunnels).
-  # With the tunnel you do NOT need to publish port 7860 to the host.
+  #   docker compose --profile tunnel up -d --build
+  # Requires TUNNEL_TOKEN in .env (Zero Trust -> Networks -> Tunnels).
+  # See deploy/cloudflared/README.md for the full runbook.
   tunnel:
     image: cloudflare/cloudflared:latest
     profiles: ["tunnel"]

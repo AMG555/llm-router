@@ -230,15 +230,21 @@ Then start the app with `--proxy-headers --forwarded-allow-ips=*` so it trusts
 A **Cloudflare Tunnel** is only needed for **self-hosted** deployments that must
 not open inbound ports (NAT, no public IP, home/lab servers) or when you want
 Cloudflare's WAF, DDoS protection and Zero Trust Access in front. It is *not*
-needed where the platform already terminates TLS. To enable it:
+needed where the platform already terminates TLS. To enable it, put the tunnel
+token in `.env` and start the profile:
 
-```bash
-cp deploy/cloudflared/config.example.yml deploy/cloudflared/config.yml
-# create a tunnel + DNS route in your Cloudflare Zero Trust dashboard
-docker compose --profile tunnel up -d
+```dotenv
+TUNNEL_TOKEN=…        # Zero Trust → Networks → Tunnels → create → connector token
 ```
 
-With the tunnel you can drop the published `7860` port.
+```bash
+docker compose --profile tunnel up -d --build
+```
+
+Then add a public hostname in the tunnel dashboard pointing at HTTP
+`router:7860`, and (optionally) drop the router's published `7860` port. Full
+runbook, named-tunnel and no-compose options, Access policy and troubleshooting:
+ **[`deploy/cloudflared/README.md`](deploy/cloudflared/README.md)**.
 
 ### Managed / PaaS platforms
 

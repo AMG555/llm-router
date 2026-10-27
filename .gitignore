@@ -6,3 +6,7 @@ data/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# cloudflared real config + credentials (keep only *.example.yml)
+deploy/cloudflared/config.yml
+deploy/cloudflared/*.json
