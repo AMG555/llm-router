@@ -164,7 +164,8 @@ function newProviderModal() {
     <div class="field"><label>Name (unique)</label><input id="prName" placeholder="groq-main" required></div>
     <div class="field"><label>Adapter</label><select id="prAdapter"><option>openai</option><option>anthropic</option><option>gemini</option></select></div>
     <div class="field"><label>Base URL</label><input id="prBase" placeholder="https://host/v1" required></div>
-    <div class="field"><label>Extra headers (JSON)</label><input id="prHeaders" value="{}"></div>`,
+    <div class="field"><label>Extra headers (JSON)</label><input id="prHeaders" value="{}"></div>
+    <div class="field"><label>Egress proxy (optional)</label><input id="prProxy" placeholder="http://user:pass@fixed-ip-host:3128"></div>`,
     async (modal) => {
       const headers = JSON.parse($("#prHeaders", modal).value || "{}");
       await api("/admin/api/providers", { method: "POST", body: {
@@ -173,6 +174,7 @@ function newProviderModal() {
         adapter: $("#prAdapter", modal).value,
         base_url: $("#prBase", modal).value.trim(),
         headers,
+        proxy: $("#prProxy", modal).value.trim(),
       }});
       toast("Provider added", "ok");
     });
@@ -392,6 +394,7 @@ function renderProviders() {
       <div class="panel-head">
         <h3>${esc(p.name)}</h3>
         <span class="tag">${esc(p.adapter)}</span>
+        ${p.proxy_set ? '<span class="tag" title="upstream calls leave through an egress proxy">egress:proxy</span>' : ""}
         ${p.enabled ? "" : '<span class="pill off">disabled</span>'}
         <span class="spacer"></span>
         <button class="btn sm" data-action="add-key" data-id="${p.id}">Add key</button>

@@ -37,14 +37,39 @@ class Router:
         self.s = settings
         self.bus = bus
         self.swrr = {}
-        self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(settings.request_timeout, connect=settings.connect_timeout),
+        self._clients = {}
+        # default client (env proxies honoured unless a global egress proxy is set)
+        self.client = self.client_for(None)
+
+    def _new_client(self, proxy):
+        return httpx.AsyncClient(
+            timeout=httpx.Timeout(self.s.request_timeout, connect=self.s.connect_timeout),
             limits=httpx.Limits(max_connections=256, max_keepalive_connections=64),
             follow_redirects=True,
+            proxy=proxy,
+            trust_env=(proxy is None),
         )
 
+    def client_for(self, proxy):
+        """Return a cached httpx client for a given egress proxy.
+
+        ``proxy=None`` yields the default client, which uses ``EGRESS_PROXY``
+        when configured, otherwise standard ``HTTP(S)_PROXY`` env vars.
+        """
+        proxy = (proxy or "").strip() or None
+        if proxy is None and self.s.egress_proxy:
+            proxy = self.s.egress_proxy
+        key = proxy or ""
+        client = self._clients.get(key)
+        if client is None:
+            client = self._new_client(proxy)
+            self._clients[key] = client
+        return client
+
     async def aclose(self):
-        await self.client.aclose()
+        for client in list(self._clients.values()):
+            await client.aclose()
+        self._clients.clear()
 
     # ---------------- candidate resolution ----------------
     def _cand(self, target, provider, key):
@@ -73,6 +98,7 @@ class Router:
             "t_rpm": pick(target.get("max_rpm"), 0),
             "t_tpm": pick(target.get("max_tpm"), 0),
             "extra_headers": json.loads(provider.get("headers") or "{}"),
+            "proxy": (provider.get("proxy") or "").strip(),
         }
 
     def candidates(self, vmodel: dict):
@@ -186,9 +212,10 @@ class Router:
             adapter = get_adapter(cand["adapter"])
             t0 = time.time()
             try:
+                client = self.client_for(cand.get("proxy"))
                 url, headers, payload, _ = adapter.build(cand, body, stream)
-                req = self.client.build_request("POST", url, json=payload, headers=headers)
-                resp = await self.client.send(req, stream=True)
+                req = client.build_request("POST", url, json=payload, headers=headers)
+                resp = await client.send(req, stream=True)
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
                     httpx.RemoteProtocolError, httpx.PoolTimeout) as e:
                 self.limiter.release(cand, int((time.time() - t0) * 1000), 599)
@@ -333,7 +360,8 @@ class Router:
             url = p["base_url"].rstrip("/") + "/models"
             headers = {"x-goog-api-key": keys[0]["api_key"]}
         try:
-            r = await self.client.get(url, headers=headers, timeout=20)
+            client = self.client_for(p.get("proxy"))
+            r = await client.get(url, headers=headers, timeout=20)
             r.raise_for_status()
             data = r.json()
             if "data" in data:

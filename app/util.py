@@ -15,6 +15,15 @@ def mask(secret: str) -> str:
     return f"{secret[:7]}...{secret[-4:]}"
 
 
+def mask_proxy(url: str) -> str:
+    """Hide credentials embedded in a proxy URL (user:pass@host)."""
+    if not url or "@" not in url:
+        return url
+    scheme, _, rest = url.partition("://")
+    _, _, hostpart = rest.rpartition("@")
+    return f"{scheme}://***@{hostpart}" if scheme else f"***@{hostpart}"
+
+
 def est_tokens(text: str) -> int:
     if not text:
         return 0

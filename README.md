@@ -117,6 +117,8 @@ All configuration is environment variables (see `.env.example`).
 | `FORCE_HTTPS` | `false` | Always emit HSTS. |
 | `ADMIN_MAX_FAILS` / `ADMIN_LOCK_SECONDS` | `10` / `300` | Admin brute-force lockout. |
 | `BLOCK_PRIVATE_UPSTREAMS` | `false` | Reject upstreams in private/loopback ranges. |
+| `EGRESS_PROXY` | — | Force upstream calls through a fixed-IP proxy (for IP allowlisting). |
+| `EGRESS_CHECK_URL` | — | IP-echo URL used by `/admin/api/egress?check=1`. |
 | `MAX_ATTEMPTS` | `8` | Max upstream attempts per request. |
 | `DEFAULT_COOLDOWN` / `SHORT_COOLDOWN` | `20` / `5` | Cooldown seconds. |
 | `REQUEST_TIMEOUT` / `CONNECT_TIMEOUT` | `600` / `15` | Upstream timeouts. |
@@ -135,6 +137,7 @@ All configuration is environment variables (see `.env.example`).
 | POST | `/v1/chat/completions` | gateway | Chat (streaming supported). |
 | POST | `/v1/completions` | gateway | Legacy completions. |
 | POST | `/v1/embeddings` | gateway | Embeddings passthrough. |
+| GET | `/admin/api/egress` | admin | Report the outbound IP / proxy configuration. |
 | GET | `/admin/api/*` | admin | Console backend. |
 
 Responses carry `x-router-provider`, `x-router-key`, `x-router-model` and
@@ -290,7 +293,6 @@ itself from that value. For durable storage, mount a volume, use a managed
 disk, or point `DB_PATH` at a persistent location.
 
 ---
-
 ## Operations
 
 - **Health**: `GET /health` for liveness, `GET /readyz` for readiness — wire
@@ -303,6 +305,30 @@ disk, or point `DB_PATH` at a persistent location.
   cooldowns are per key so rotation does not disturb sibling keys.
 - **Reset**: `POST /admin/api/keys/{id}/reset` clears a key's cooldown and
   windows after you have fixed the underlying problem.
+
+### Static / allowlisted egress IP
+
+Some providers restrict a key to specific source IPs. The gateway's outbound
+identity is whatever the host's network gives it, so you make it **stable and
+allowlisted** rather than rotating it:
+
+1. **Discover the IP.** `GET /admin/api/egress` returns the local outbound IP
+   and the active proxy configuration. With `EGRESS_CHECK_URL` set (a URL that
+   echoes your public IP), `GET /admin/api/egress?check=1` also reports the
+   observed public IP. Allowlist that at the provider.
+2. **Pin it globally.** Set `EGRESS_PROXY` to a proxy with a fixed IP; every
+   upstream call leaves through it. If unset, standard `HTTP_PROXY` /
+   `HTTPS_PROXY` / `NO_PROXY` env vars are honoured. On cloud platforms this is
+   typically a NAT gateway / static-IP add-on — the app itself cannot change the
+   datacentre's egress IP.
+3. **Pin it per provider.** Give a provider its own `proxy` (console field:
+   *Egress proxy*, or `POST /admin/api/providers` with `proxy`). Use this when
+   different providers require different allowlisted IPs.
+4. Per-provider proxies are cached per proxy URL, so calls reuse connections.
+
+> **Note.** This is for allowlisting and compliance. Do **not** rotate source
+> IPs to sidestep a provider's per-IP rate limits — that is evasion and breaches
+> provider terms. The gateway pins an egress identity; it does not cycle one.
 
 ---
 

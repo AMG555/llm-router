@@ -132,6 +132,18 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _local_ip() -> str:
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))  # no packets sent for UDP connect
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
 def gateway_auth(request: Request):
     if not settings.require_auth:
         return "open"
@@ -261,7 +273,7 @@ async def embeddings(request: Request, _=Depends(gateway_auth)):
             continue
         try:
             url, headers, payload, _ = adapter.build_embeddings(cand, body)
-            r = await router.client.post(url, json=payload, headers=headers)
+            r = await router.client_for(cand.get("proxy")).post(url, json=payload, headers=headers)
         except Exception:
             limiter.cool(cand, 5, "network", key_only=True)
             continue
@@ -283,7 +295,9 @@ async def admin_state(_=Depends(admin_auth)):
     health = limiter.health()
     logs = store.rows("logs", "1=1 ORDER BY id DESC LIMIT 50")
     return {
-        "providers": [{**p, "key_count": len(store.keys_by_provider.get(p["id"], []))}
+        "providers": [{**p, "proxy": util.mask_proxy(p.get("proxy") or ""),
+                       "proxy_set": bool(p.get("proxy")),
+                       "key_count": len(store.keys_by_provider.get(p["id"], []))}
                       for p in store.providers.values()],
         "keys": [{**{k: v for k, v in key.items() if k != "api_key"},
                   "masked": util.mask(key["api_key"]),
@@ -320,6 +334,34 @@ async def admin_health(_=Depends(admin_auth)):
     return limiter.health()
 
 
+@app.get("/admin/api/egress")
+async def admin_egress(check: int = 0, _=Depends(admin_auth)):
+    """Report the outbound identity used for upstream calls.
+
+    Use this to discover the IP to allowlist at your provider. ``check=1``
+    additionally calls ``EGRESS_CHECK_URL`` to observe the public IP.
+    """
+    info = {
+        "global_proxy": util.mask_proxy(settings.egress_proxy),
+        "global_proxy_set": bool(settings.egress_proxy),
+        "trust_env": not bool(settings.egress_proxy),
+        "local_ip": _local_ip(),
+        "providers": {p["name"]: util.mask_proxy(p.get("proxy") or "")
+                      for p in store.providers.values() if p.get("proxy")},
+    }
+    if check:
+        if not settings.egress_check_url:
+            info["check_error"] = "EGRESS_CHECK_URL is not configured"
+        else:
+            try:
+                r = await router.client_for(None).get(settings.egress_check_url, timeout=10)
+                info["check_url"] = settings.egress_check_url
+                info["observed"] = r.text.strip()[:200]
+            except Exception as e:
+                info["check_error"] = str(e)
+    return info
+
+
 @app.post("/admin/api/providers")
 async def add_provider(request: Request, _=Depends(admin_auth)):
     b = await request.json()
@@ -335,11 +377,18 @@ async def add_provider(request: Request, _=Depends(admin_auth)):
     except ValueError as e:
         raise HTTPException(400, str(e))
     headers = b.get("headers") or preset_headers(preset)
+    proxy = (b.get("proxy") or "").strip()
+    if proxy:
+        try:
+            proxy = validate_upstream_url(proxy)
+        except ValueError as e:
+            raise HTTPException(400, f"invalid proxy: {e}")
     pid = store.insert("providers", {
         "name": name,
         "adapter": b.get("adapter") or PRESETS.get(preset, {}).get("adapter", "openai"),
         "base_url": base_url,
         "headers": json.dumps(headers),
+        "proxy": proxy,
         "notes": b.get("notes", ""),
         "enabled": 1 if b.get("enabled", True) else 0,
         "created_at": time.time(),
@@ -357,6 +406,13 @@ async def edit_provider(pid: int, request: Request, _=Depends(admin_auth)):
             b["base_url"] = validate_upstream_url(b["base_url"], settings.block_private_upstreams)
         except ValueError as e:
             raise HTTPException(400, str(e))
+    if "proxy" in b:
+        b["proxy"] = (b["proxy"] or "").strip()
+        if b["proxy"]:
+            try:
+                b["proxy"] = validate_upstream_url(b["proxy"])
+            except ValueError as e:
+                raise HTTPException(400, f"invalid proxy: {e}")
     for k in ("enabled", "sticky"):
         if k in b:
             b[k] = 1 if b[k] else 0

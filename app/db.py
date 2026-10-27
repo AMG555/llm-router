@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS providers(
   adapter TEXT NOT NULL DEFAULT 'openai',
   base_url TEXT NOT NULL,
   headers TEXT DEFAULT '{}',
+  proxy TEXT DEFAULT '',
   notes TEXT DEFAULT '',
   enabled INTEGER DEFAULT 1,
   created_at REAL
@@ -71,7 +72,7 @@ CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts DESC);
 # Columns a caller is allowed to write, per table. Anything else is rejected,
 # which closes SQL injection through attacker-controlled column names.
 COLUMNS = {
-    "providers": {"name", "adapter", "base_url", "headers", "notes", "enabled", "created_at"},
+    "providers": {"name", "adapter", "base_url", "headers", "proxy", "notes", "enabled", "created_at"},
     "api_keys": {"provider_id", "label", "api_key", "enabled", "weight", "priority",
                  "max_rpm", "max_tpm", "max_concurrency", "created_at"},
     "vmodels": {"name", "description", "strategy", "sticky", "enabled", "created_at"},
@@ -95,6 +96,7 @@ class Store:
         self.conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
         self.providers = {}
         self.keys = {}
@@ -104,6 +106,13 @@ class Store:
         self.targets = []
         self.gateway = set()
         self.load()
+
+    # ---------- migrations ----------
+    def _migrate(self):
+        """Add columns introduced after a database may already exist."""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(providers)")}
+        if "proxy" not in cols:
+            self.conn.execute("ALTER TABLE providers ADD COLUMN proxy TEXT DEFAULT ''")
 
     # ---------- validation / crypto ----------
     @staticmethod

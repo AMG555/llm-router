@@ -44,6 +44,15 @@ class Settings:
         self.secret_key = os.getenv("SECRET_KEY", "").strip()  # enables at-rest encryption
         self.block_private_upstreams = _bool(os.getenv("BLOCK_PRIVATE_UPSTREAMS"), False)
 
+        # --- egress / static outbound IP ---
+        # If set, all upstream calls leave through this proxy (must be a fixed,
+        # allowlisted egress IP). Standard HTTP_PROXY/HTTPS_PROXY are also
+        # honoured when this is unset.
+        self.egress_proxy = os.getenv("EGRESS_PROXY", "").strip()
+        # Optional URL returning the caller's public IP (e.g. an IP echo
+        # service); used by GET /admin/api/egress?check=1.
+        self.egress_check_url = os.getenv("EGRESS_CHECK_URL", "").strip()
+
         # --- misc ---
         self.bootstrap = os.getenv("BOOTSTRAP_CONFIG", "").strip()
         self.log_requests = _bool(os.getenv("LOG_REQUESTS"), True)
