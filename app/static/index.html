@@ -3,62 +3,119 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>LLM Router</title>
+<meta name="color-scheme" content="light">
+<title>LLM Router — Control Console</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<aside>
-  <div class="brand"><span class="dot"></span> LLM<b>Router</b></div>
-  <nav>
-    <button data-tab="dash" class="active">Dashboard</button>
-    <button data-tab="models">Models</button>
-    <button data-tab="providers">Providers &amp; Keys</button>
-    <button data-tab="logs">Live Logs</button>
-    <button data-tab="settings">Settings</button>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+      <path d="M16 6v7M16 13l-8 6M16 13l8 6" />
+      <circle cx="16" cy="6" r="3.2" />
+      <circle cx="8" cy="22" r="3.2" />
+      <circle cx="24" cy="22" r="3.2" />
+      <circle cx="16" cy="13" r="2.2" class="hub" />
+    </svg>
+    <span class="wordmark">LLM<b>Router</b></span>
+    <span class="wordmark-sub">control console</span>
+  </div>
+  <div class="topbar-right">
+    <span class="chip" id="envChip" title="runtime environment">env:&nbsp;<b>—</b></span>
+    <span class="chip" id="encChip" title="at-rest encryption">at-rest:&nbsp;<b>—</b></span>
+    <span class="status" id="statusDot"><i></i><span id="statusText">connecting…</span></span>
+  </div>
+</header>
+
+<div class="shell">
+  <nav class="rail" aria-label="Primary">
+    <button class="nav-item is-active" data-tab="dash"><span class="idx">01</span><span>Dashboard</span></button>
+    <button class="nav-item" data-tab="models"><span class="idx">02</span><span>Virtual models</span></button>
+    <button class="nav-item" data-tab="providers"><span class="idx">03</span><span>Providers &amp; keys</span></button>
+    <button class="nav-item" data-tab="logs"><span class="idx">04</span><span>Live traffic</span></button>
+    <button class="nav-item" data-tab="settings"><span class="idx">05</span><span>Access &amp; config</span></button>
   </nav>
-  <div class="base-url" id="baseUrl"></div>
-</aside>
 
-<main>
-  <section id="tab-dash" class="tab active">
-    <h1>Dashboard</h1>
-    <div class="cards" id="statCards"></div>
-    <h2>Key health</h2>
-    <div id="keyHealth" class="table-wrap"></div>
-  </section>
+  <main id="main">
+    <section id="tab-dash" class="tab is-active">
+      <div class="eyebrow">Overview</div>
+      <h1>Control plane</h1>
+      <p class="lede">One OpenAI-compatible endpoint fanning out across every configured key, with live health and automatic failover.</p>
+      <div class="stats" id="statCards"></div>
 
-  <section id="tab-models" class="tab">
-    <h1>Virtual models <button class="btn" onclick="modalNewModel()">+ New model</button></h1>
-    <p class="hint">A virtual model is the single name your app sends. It fans out to every target below it.</p>
-    <div id="models"></div>
-  </section>
+      <div class="section-head">
+        <h2>Key health</h2>
+        <span class="section-note" id="healthNote"></span>
+      </div>
+      <div class="table-wrap" id="keyHealth"></div>
+    </section>
 
-  <section id="tab-providers" class="tab">
-    <h1>Providers <button class="btn" onclick="modalNewProvider()">+ Add provider</button></h1>
-    <p class="hint">Add unlimited keys per provider. Each key has its own RPM/TPM budget and cooldown timer.</p>
-    <div id="providers"></div>
-  </section>
+    <section id="tab-models" class="tab">
+      <div class="eyebrow">Routing</div>
+      <h1>Virtual models</h1>
+      <p class="lede">A virtual model is the single name your app sends. It resolves to one or more upstream targets.</p>
+      <div class="toolbar">
+        <button class="btn" data-action="new-model">New model</button>
+      </div>
+      <div id="models"></div>
+    </section>
 
-  <section id="tab-logs" class="tab">
-    <h1>Live routing log <button class="btn ghost" onclick="api('/admin/api/logs',{method:'DELETE'}).then(refresh)">Clear</button></h1>
-    <div id="logFeed" class="feed"></div>
-  </section>
+    <section id="tab-providers" class="tab">
+      <div class="eyebrow">Supply</div>
+      <h1>Providers &amp; keys</h1>
+      <p class="lede">Add unlimited keys per provider. Every key carries its own RPM/TPM budget, concurrency cap and cooldown timer.</p>
+      <div class="toolbar">
+        <button class="btn" data-action="new-provider">Add provider</button>
+      </div>
+      <div id="providers"></div>
+    </section>
 
-  <section id="tab-settings" class="tab">
-    <h1>Settings</h1>
-    <h2>Gateway keys (give these to your apps)</h2>
-    <div id="gwKeys"></div>
-    <h2>Admin token</h2>
-    <input id="adminToken" placeholder="ADMIN_TOKEN" onchange="saveToken()">
-    <h2>Config</h2>
-    <div class="row">
-      <button class="btn" onclick="exportCfg()">Export JSON</button>
-      <label class="btn ghost">Import JSON<input type="file" hidden onchange="importCfg(this)"></label>
-    </div>
-  </section>
-</main>
+    <section id="tab-logs" class="tab">
+      <div class="eyebrow">Telemetry</div>
+      <h1>Live traffic</h1>
+      <div class="toolbar">
+        <button class="btn ghost" data-action="clear-logs">Clear log</button>
+        <span class="section-note" id="streamNote"></span>
+      </div>
+      <div id="logFeed" class="feed" aria-live="polite"></div>
+    </section>
 
-<div id="modalRoot"></div>
-<script src="/static/app.js"></script>
+    <section id="tab-settings" class="tab">
+      <div class="eyebrow">Connection</div>
+      <h1>Access &amp; config</h1>
+
+      <h2>Endpoint</h2>
+      <div class="snippet">
+        <div class="snippet-row"><span class="snippet-k">base&nbsp;url</span><code id="baseUrl">—</code></div>
+      </div>
+
+      <h2>Gateway keys</h2>
+      <p class="hint">Hand these to your applications. Anyone holding one can spend your upstream quota, so treat them as secrets.</p>
+      <div id="gwKeys"></div>
+      <div class="toolbar"><button class="btn" data-action="new-gw-key">Generate key</button></div>
+
+      <h2>Admin token</h2>
+      <p class="hint">Stored only in this browser. It authenticates the console against the server.</p>
+      <div class="field narrow">
+        <input id="adminToken" type="password" autocomplete="off" placeholder="ADMIN_TOKEN" aria-label="Admin token">
+      </div>
+      <div class="toolbar"><button class="btn ghost" data-action="save-token">Save token</button></div>
+
+      <h2>Configuration</h2>
+      <div class="toolbar">
+        <button class="btn ghost" data-action="export-config">Export JSON</button>
+        <button class="btn ghost" data-action="import-config">Import JSON</button>
+        <input id="importFile" type="file" accept="application/json" hidden>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="modalRoot" class="modal-root" hidden></div>
+<div id="toastRoot" class="toast-root" aria-live="polite"></div>
+<script src="/static/app.js" defer></script>
 </body>
 </html>
