@@ -1,0 +1,31 @@
+services:
+  router:
+    build: .
+    image: llm-router:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: "7860"
+      ENV: production
+    ports:
+      - "7860:7860"
+    volumes:
+      - router-data:/data
+
+  # Optional: publish the gateway through Cloudflare Tunnel.
+  # Enable with:  docker compose --profile tunnel up -d
+  # Requires TUNNEL_TOKEN (Cloudflare Zero Trust -> Networks -> Tunnels).
+  # With the tunnel you do NOT need to publish port 7860 to the host.
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    depends_on:
+      - router
+
+volumes:
+  router-data:

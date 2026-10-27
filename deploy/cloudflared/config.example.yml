@@ -1,0 +1,28 @@
+# Cloudflare Tunnel (cloudflared) — example configuration
+#
+# Only needed when you self-host and want to expose the router WITHOUT
+# opening inbound ports (e.g. behind NAT or a home/lab server), or when you
+# want Cloudflare's WAF, DDoS protection and Zero Trust Access in front.
+#
+# Managed cloud hosts (Render, Fly, Cloud Run, HF Spaces) already terminate
+# TLS and give you a public HTTPS URL, so a tunnel is optional there.
+#
+# Named-tunnel setup:
+#   cloudflared tunnel login
+#   cloudflared tunnel create llm-router
+#   cloudflared tunnel route dns llm-router router.example.com
+#   cloudflared tunnel run --config config.yml llm-router
+#
+# Then point the tunnel at the local service (the compose service name is
+# `router` on port 7860):
+
+tunnel: llm-router
+credentials-file: /etc/cloudflared/<TUNNEL-ID>.json
+
+ingress:
+  - hostname: router.example.com
+    service: http://router:7860
+    originRequest:
+      noTLSVerify: true
+      connectTimeout: 30s
+  - service: http_status:404

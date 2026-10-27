@@ -10,114 +10,278 @@ pinned: false
 
 # LLM Router
 
-One OpenAI-compatible endpoint. Unlimited providers, unlimited keys, zero rate-limit pain.
+A self-hosted, OpenAI-compatible gateway. Point it at one or more providers,
+add as many keys as you like, define **virtual model** names of your own, and
+your applications talk to a single URL, a single key and a single model name.
 
-## Endpoint
+Behind the scenes every request is scored against live per-key RPM/TPM windows,
+per-key cooldowns and concurrency caps, then routed with automatic failover —
+before the first byte is streamed.
 
-- Base URL: `https://<your-space>.hf.space/v1`
-- Auth: `Authorization: Bearer <gateway key from the admin UI>`
-- Model: any name you defined as a virtual model
+> **Compliance.** This gateway pools keys **you control**. Aggregating keys you
+> are authorised to use (separate projects, teams or organisations) for
+> reliability, cost control and a unified endpoint is the intended use. Using it
+> to evade a provider's per-account rate limits, or to run many accounts of the
+> same provider to farm free quota, may breach that provider's terms and can get
+> accounts banned. Respect each provider's terms.
 
-## Admin UI
+---
 
-Open the Space root URL. Paste your `ADMIN_TOKEN` when prompted.
+## Contents
 
-## Free-tier notes
+- [Features](#features)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [API](#api)
+- [Admin console](#admin-console)
+- [Security model](#security-model)
+- [Testing](#testing)
+- [Deployment](#deployment)
+  - [Docker](#docker)
+  - [Docker Compose](#docker-compose)
+  - [Cloudflare Tunnel (optional)](#cloudflare-tunnel-optional)
+  - [Render (free) + UptimeRobot keep-alive](#render-free--uptimerobot-keep-alive)
+  - [Hugging Face Spaces](#hugging-face-spaces)
+- [Request lifecycle](#request-lifecycle)
+- [Limitations](#limitations)
 
-- HF Spaces free: filesystem is ephemeral. Set `BOOTSTRAP_CONFIG` (base64 JSON) so config reloads on restart.
-- Render free: spins down after ~15 min idle. Point a free uptime pinger at `/health`.
+---
 
-## Deploy
+## Features
 
-### Hugging Face Spaces (free, Docker)
+- **One endpoint, many providers.** OpenAI-compatible `/v1` surface. Anthropic
+  (`/v1/messages`) and Google Gemini (`:generateContent`) are first-class and
+  translated both ways, including SSE streaming.
+- **Unlimited keys per provider.** Keys are pooled; add as many as you need.
+- **Per-key rate governor.** Sliding 60s RPM/TPM windows plus concurrency caps.
+  A key at budget is skipped, never queued.
+- **Correct cooldowns.** `Retry-After` and `x-ratelimit-reset-*` are honoured and
+  parsed (`ms`/`s`/`m`). Cooldowns are per key, so one key's limit never blocks
+  its siblings.
+- **Failover before first byte.** Status is inspected before the body is streamed,
+  so a 429/5xx/timeout on one key transparently retries on the next.
+- **Routing strategies.** `balanced` (priority tiering + weighted round robin),
+  `priority`, `round_robin`, `least_latency`, `random`, with optional sticky
+  sessions for prompt-cache affinity.
+- **Tool calling and multimodal passthrough** preserved end to end.
+- **Operator console.** Live key health, per-key cooldown timers, traffic log,
+  config import/export, all behind an admin token.
 
-1. New Space → **SDK: Docker** → *Blank*.
-2. Upload every file above, preserving the `app/` folder.
-3. Space Settings → **Variables and secrets** → add `ADMIN_TOKEN` (random string).
-4. It builds and serves on port 7860. Open the Space URL, paste the token, start adding providers.
+---
 
-Free Spaces sleep after 48h idle and have ephemeral disk. Keep config portable:
+## Quick start
+
+### Local
 
 ```bash
-# locally, after exporting config from the UI
-base64 -w0 llm-router-config.json
+python -m venv .venv
+. .venv/bin/activate            # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+export ADMIN_TOKEN=$(python -c "import secrets;print(secrets.token_urlsafe(24))")
+export SECRET_KEY=$(python -c "import secrets;print(secrets.token_urlsafe(32))")
+uvicorn app.main:app --port 7860
 ```
 
-Paste the result into a Space secret named `BOOTSTRAP_CONFIG`. On every cold boot the router rebuilds itself.
+Open <http://localhost:7860>, paste the admin token, add a provider and a key,
+create a virtual model with a target, then call it:
 
-### Render free tier
+```bash
+curl http://localhost:7860/v1/chat/completions \
+  -H "Authorization: Bearer <gateway key from Settings>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"fast-chat","messages":[{"role":"user","content":"hi"}]}'
+```
 
-1. Push to GitHub, then Render → **New → Blueprint**, point at the repo (it reads `render.yaml`).
-2. Add `ADMIN_TOKEN` as an env var if not auto-generated.
-3. Free instances sleep after 15 idle minutes. Add a free cron pinger (cron-job.org / UptimeRobot) hitting `https://yourapp.onrender.com/health` every 10 minutes to keep it warm — a self-ping won't work because the process is already asleep.
-
-### Any VPS / Docker host
+### Docker
 
 ```bash
 docker build -t llm-router .
 docker run -d --name router -p 7860:7860 \
-  -e ADMIN_TOKEN=your-secret \
-  -v $(pwd)/data:/data \
-  llm-router
+  -e ADMIN_TOKEN=change-me -e SECRET_KEY=change-me \
+  -v "$PWD/data:/data" llm-router
 ```
 
-The `-v` mount makes SQLite persistent.
+---
 
-## Wire up your app
+## Configuration
 
-You only ever change the base URL and the key. Nothing else.
+All configuration is environment variables (see `.env.example`).
 
-```python
-from openai import OpenAI
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ADMIN_TOKEN` | auto-generated | Console/admin auth. Generated and printed if unset. |
+| `SECRET_KEY` | — | Enables AES-256-GCM encryption of stored keys/headers at rest. |
+| `ENV` | `production` | `production` keeps docs off and defaults strict. |
+| `DB_PATH` | `./data/router.db` | SQLite location (persist this). |
+| `REQUIRE_GATEWAY_AUTH` | `true` | Require a key on `/v1`. |
+| `GATEWAY_RPM` | `0` | Per gateway-key requests/minute (0 = unlimited). |
+| `MAX_BODY_BYTES` | `2097152` | Reject oversized request bodies with 413. |
+| `CORS_ORIGINS` | *(empty)* | Comma list; empty means same-origin only. |
+| `TRUSTED_HOSTS` | `*` | Allowed `Host` header values. |
+| `ENABLE_DOCS` | `false` | Serve `/docs`, `/redoc`, `/openapi.json`. |
+| `FORCE_HTTPS` | `false` | Always emit HSTS. |
+| `ADMIN_MAX_FAILS` / `ADMIN_LOCK_SECONDS` | `10` / `300` | Admin brute-force lockout. |
+| `BLOCK_PRIVATE_UPSTREAMS` | `false` | Reject upstreams in private/loopback ranges. |
+| `MAX_ATTEMPTS` | `8` | Max upstream attempts per request. |
+| `DEFAULT_COOLDOWN` / `SHORT_COOLDOWN` | `20` / `5` | Cooldown seconds. |
+| `REQUEST_TIMEOUT` / `CONNECT_TIMEOUT` | `600` / `15` | Upstream timeouts. |
+| `BOOTSTRAP_CONFIG` | — | base64 JSON imported on first boot (ephemeral hosts). |
 
-client = OpenAI(
-    base_url="https://your-space.hf.space/v1",
-    api_key="sk-router-xxxxx",      # gateway key from the admin UI
-)
+---
 
-r = client.chat.completions.create(
-    model="fast-chat",              # your virtual model
-    messages=[{"role": "user", "content": "hello"}],
-)
-print(r.choices[0].message.content)
-```
+## API
+
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| GET | `/health`, `/healthz` | none | Liveness. |
+| GET | `/readyz` | none | Readiness (DB reachable). |
+| GET | `/v1/models` | gateway | List virtual models. |
+| POST | `/v1/chat/completions` | gateway | Chat (streaming supported). |
+| POST | `/v1/completions` | gateway | Legacy completions. |
+| POST | `/v1/embeddings` | gateway | Embeddings passthrough. |
+| GET | `/admin/api/*` | admin | Console backend. |
+
+Responses carry `x-router-provider`, `x-router-key`, `x-router-model` and
+`x-router-attempts` so you can see exactly which key served each request.
+
+**Escape hatch.** Request `"model": "<provider-name>:<upstream-model>"` to route
+straight at a provider's whole key pool without defining a virtual model.
+
+---
+
+## Admin console
+
+Served at `/`. The token field stores your admin token in the browser only.
+Everything dynamic is HTML-escaped and rendered without inline handlers, so the
+strict `script-src 'self'` Content-Security-Policy holds.
+
+---
+
+## Security model
+
+- Admin surface is **never** unauthenticated: a token is generated if unset.
+- Constant-time token comparisons; per-IP admin lockout after repeated failures.
+- **Column allow-list on every write**, closing SQL injection via column names.
+- Optional **AES-256-GCM at-rest encryption** for upstream keys and headers.
+- Same-origin by default (no wildcard CORS), plus HSTS, `nosniff`, `DENY`
+  framing, `no-referrer`, and a restrictive CSP.
+- Request body size cap; docs/OpenAPI off in production; config export masks
+  secrets unless `reveal=1` is explicitly requested.
+- Upstream `base_url` validation; optional private-range blocking (SSRF guard).
+- Secrets are never logged; keys are masked everywhere except a deliberate,
+  admin-authenticated export.
+
+---
+
+## Testing
 
 ```bash
-curl https://your-space.hf.space/v1/chat/completions \
-  -H "Authorization: Bearer sk-router-xxxxx" \
-  -H "Content-Type: application/json" \
-  -H "x-session-id: user-42-conv-7" \
-  -d '{"model":"fast-chat","messages":[{"role":"user","content":"hi"}],"stream":true}'
+pip install -r requirements-dev.txt
+python -m pytest -q              # full suite
+python -m pytest --cov=app       # with coverage
 ```
 
-Every response carries `x-router-provider`, `x-router-key`, and `x-router-attempts` so you can see exactly which key served it.
+The suite runs against a local mock upstream (no network, no real keys) and
+covers the rate governor, adapters (OpenAI/Anthropic/Gemini incl. SSE),
+deterministic failover, weighted A/B routing, config portability and the
+security controls. CI runs it on Python 3.11–3.13 (`.github/workflows/ci.yml`).
 
-## How it dodges limits — the actual mechanics
+---
 
-**Sliding-window governor.** Each key keeps a 60-second deque of request timestamps and a deque of `(timestamp, tokens)` pairs. Before a key is used, the governor prunes anything older than 60s and checks three things: `len(rpm_deque) < max_rpm`, `sum(tpm) < max_tpm`, `inflight < max_concurrency`. A key at budget is *skipped*, not queued — that's why there's no lag.
+## Deployment
 
-**Retry-After, honored exactly.** On a 429 the router reads `retry-after` plus Groq/OpenAI/Anthropic's `x-ratelimit-reset-*` headers, parsing `ms`, `s`, and `m` suffixes. That key goes into a cooldown until the provider says it's free, then returns to the pool automatically. Nothing is hard-disabled.
+### Docker
 
-**Failover before first byte.** `httpx.send(req, stream=True)` returns as soon as headers land. The router inspects the status code *before* touching the body. 429 → next key. 5xx/408/timeout → short 5s cooldown, next key. 401/403 → 120s cooldown, next key. 404 → the model doesn't exist there, next key. Only genuine 4xx client errors pass through un-rotated. Streaming clients never see the retry.
+The image runs as a non-root user, ships a `HEALTHCHECK` and honours
+`--proxy-headers` for correct HTTPS/HSTS detection behind a proxy. Mount a
+volume at `/data` to persist SQLite.
 
-**Smooth weighted round-robin.** Nginx-style: each candidate carries a running counter; the router repeatedly picks the max `(counter + weight)` and subtracts total weight. Higher `weight` = proportionally more traffic, with no bursty pattern.
+### Docker Compose
 
-**Sticky sessions.** Send `x-session-id` and the same conversation pins to the same key, so upstream prompt caching actually hits. Without it, requests rotate freely.
+```bash
+cp .env.example .env      # set ADMIN_TOKEN and SECRET_KEY
+docker compose up -d
+```
 
-**Two-tier caps.** Limits live on the *key* (the real shared provider resource) and separately on the *target* (per-model ceiling). If one key serves three virtual models, its RPM budget is shared correctly across all of them.
+### Cloudflare Tunnel (optional)
 
-**Token accounting.** Prompt tokens estimated from the payload; completion tokens read from `usage` on non-streaming and from the final usage chunk on streaming (the router injects `stream_options.include_usage` for OpenAI-compatible upstreams). This feeds TPM windows so they're real, not decorative.
+**When you need it:** only for **self-hosted** deployments that must not open
+inbound ports (home/lab servers, NAT, no public IP), or when you want
+Cloudflare's WAF, DDoS protection and Zero Trust Access in front of the gateway.
 
-**Health scoring.** Per-key latency EMA tracks slow keys. Use `least_latency` strategy to route around them, or `priority` for strict failover chains.
+**When you don't:** managed hosts (Render, Fly, Cloud Run, Hugging Face Spaces)
+already terminate TLS and expose an HTTPS URL — a tunnel adds nothing there and
+an extra hop of latency.
 
-## Compliance note
+To enable it, create a tunnel in Cloudflare Zero Trust (**Networks → Tunnels**),
+copy its token into `TUNNEL_TOKEN`, and start the profile:
 
-This router pools keys **you control**. Using it to evade a provider's per-account rate limits, or to run many accounts of the same provider to farm free quota, may breach that provider's terms of service and can get accounts/keys banned. Use it with keys you're authorized to aggregate (separate projects, teams, or orgs), and respect each provider's terms.
+```bash
+docker compose --profile tunnel up -d
+```
 
-## Things worth knowing
+With the tunnel you can drop the published `7860` port. A named-tunnel config
+example lives at `deploy/cloudflared/config.example.yml`.
 
-- **Anthropic and Gemini are first-class.** The router translates OpenAI-format requests into `/v1/messages` and `:generateContent` and translates responses and SSE streams back. Your app stays OpenAI-shaped even when hitting Claude or Gemini.
-- **`provider:model` escape hatch.** Request `groq:llama-3.3-70b-versatile` and it routes directly to that provider using its whole key pool — no virtual model needed.
-- **Don't commit keys.** Export config, base64 it, and use it as an env secret. Keys are masked in every API response.
-- **Render free's 15-minute spin-down is the one real weakness.** No router logic can fix a sleeping process; the external pinger is the answer.
-- **Free provider tiers are aggressively rate-limited.** Add 4-6 keys per provider and set `max_rpm` on each to roughly 80% of the documented limit — headroom absorbs clock skew between you and them.
+### Render (free) + UptimeRobot keep-alive
+
+1. Push to GitHub, then Render → **New → Blueprint** (uses `render.yaml`).
+2. Set `ADMIN_TOKEN` and `SECRET_KEY` (Render can generate them).
+3. **Free instances sleep after ~15 minutes idle.** An in-process self-ping
+   cannot wake a sleeping service, so use an **external** monitor:
+   - Create a free UptimeRobot **HTTP(s)** monitor.
+   - URL: `https://<your-app>.onrender.com/health` (or `/healthz`).
+   - Interval: **5 minutes** (free plan supports 5-minute checks).
+   - Expected: HTTP 200, keyword `ok`.
+
+   The 5-minute cadence keeps the instance warm through the 15-minute idle
+   window, so cold starts become rare.
+
+### Hugging Face Spaces
+
+Docker Spaces require a paid plan; **Static** Spaces are free but cannot run this
+server. If you do host it on a Docker Space:
+
+1. New Space → SDK **Docker** → Blank; upload the repo.
+2. Space Settings → *Variables and secrets* → set `ADMIN_TOKEN`, `SECRET_KEY`.
+3. The filesystem is ephemeral — export your config, base64 it, and store it as
+   `BOOTSTRAP_CONFIG` so the router rebuilds itself on every cold boot.
+
+---
+
+## Request lifecycle
+
+```
+client ──▶ /v1/chat/completions
+             │  gateway auth + rate limit
+             ▼
+        resolve virtual model ──▶ candidate list
+             │  order by strategy (sticky sessions honoured)
+             ▼
+        skip keys in cooldown / at RPM, TPM or concurrency budget
+             ▼
+        try candidate ──▶ upstream (headers only)
+             │  429/401/5xx/timeout ──▶ per-key cooldown, next candidate
+             │  client 4xx ──▶ pass through unchanged
+             ▼
+        2xx ──▶ stream or return, record usage, update health
+```
+
+---
+
+## Limitations
+
+- **Failover only happens before the first byte.** Once an upstream starts
+  streaming, mid-stream errors cannot be re-routed.
+- If **every** key is limited, the gateway returns a `429` (`no_capacity`);
+  "never any lag, ever" is not physically possible.
+- Sticky-session hashing uses the supplied session id; without one, requests
+  rotate freely.
+- SQLite is single-file state — fine for one instance. For multiple replicas,
+  move state to a shared database and a shared rate-limit store.
+
+---
+
+## License
+
+MIT — see `LICENSE`.
