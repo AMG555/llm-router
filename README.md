@@ -1,13 +1,3 @@
----
-title: LLM Router
-emoji: 🛰️
-colorFrom: indigo
-colorTo: green
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # LLM Router
 
 A self-hosted, OpenAI-compatible gateway. Point it at one or more providers,
@@ -37,12 +27,15 @@ before the first byte is streamed.
 - [Security model](#security-model)
 - [Testing](#testing)
 - [Deployment](#deployment)
-  - [Docker](#docker)
+  - [Container image](#container-image)
   - [Docker Compose](#docker-compose)
-  - [Cloudflare Tunnel (optional)](#cloudflare-tunnel-optional)
-  - [Render (free) + UptimeRobot keep-alive](#render-free--uptimerobot-keep-alive)
-  - [Hugging Face Spaces](#hugging-face-spaces)
+  - [Running behind a reverse proxy or tunnel (optional)](#running-behind-a-reverse-proxy-or-tunnel-optional)
+  - [Managed / PaaS platforms](#managed--paas-platforms)
+  - [Keeping an idle-sleeping instance warm](#keeping-an-idle-sleeping-instance-warm)
+  - [Ephemeral filesystems](#ephemeral-filesystems)
+- [Operations](#operations)
 - [Request lifecycle](#request-lifecycle)
+- [Project layout](#project-layout)
 - [Limitations](#limitations)
 
 ---
@@ -77,6 +70,7 @@ before the first byte is streamed.
 python -m venv .venv
 . .venv/bin/activate            # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+
 export ADMIN_TOKEN=$(python -c "import secrets;print(secrets.token_urlsafe(24))")
 export SECRET_KEY=$(python -c "import secrets;print(secrets.token_urlsafe(32))")
 uvicorn app.main:app --port 7860
@@ -92,7 +86,7 @@ curl http://localhost:7860/v1/chat/completions \
   -d '{"model":"fast-chat","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-### Docker
+### Container
 
 ```bash
 docker build -t llm-router .
@@ -112,6 +106,7 @@ All configuration is environment variables (see `.env.example`).
 | `ADMIN_TOKEN` | auto-generated | Console/admin auth. Generated and printed if unset. |
 | `SECRET_KEY` | — | Enables AES-256-GCM encryption of stored keys/headers at rest. |
 | `ENV` | `production` | `production` keeps docs off and defaults strict. |
+| `PORT` | `7860` | Listen port. |
 | `DB_PATH` | `./data/router.db` | SQLite location (persist this). |
 | `REQUIRE_GATEWAY_AUTH` | `true` | Require a key on `/v1`. |
 | `GATEWAY_RPM` | `0` | Per gateway-key requests/minute (0 = unlimited). |
@@ -125,6 +120,7 @@ All configuration is environment variables (see `.env.example`).
 | `MAX_ATTEMPTS` | `8` | Max upstream attempts per request. |
 | `DEFAULT_COOLDOWN` / `SHORT_COOLDOWN` | `20` / `5` | Cooldown seconds. |
 | `REQUEST_TIMEOUT` / `CONNECT_TIMEOUT` | `600` / `15` | Upstream timeouts. |
+| `LOG_REQUESTS` / `MAX_LOG_ROWS` | `true` / `5000` | Traffic log and retention. |
 | `BOOTSTRAP_CONFIG` | — | base64 JSON imported on first boot (ephemeral hosts). |
 
 ---
@@ -171,6 +167,14 @@ strict `script-src 'self'` Content-Security-Policy holds.
 - Secrets are never logged; keys are masked everywhere except a deliberate,
   admin-authenticated export.
 
+Operational guidance:
+
+- Always set `ADMIN_TOKEN` and `SECRET_KEY` to long random values and keep them
+  out of version control.
+- Terminate TLS in front of the router (your platform or a reverse proxy) and
+  run with `--proxy-headers` so HSTS is emitted correctly.
+- Back up the SQLite file (or take a config export) before upgrades.
+
 ---
 
 ## Testing
@@ -190,11 +194,24 @@ security controls. CI runs it on Python 3.11–3.13 (`.github/workflows/ci.yml`)
 
 ## Deployment
 
-### Docker
+The service is a single container that listens on `PORT` (default `7860`) and
+stores state in one SQLite file. Any environment that can run a container or a
+Python process can host it. Nothing below depends on a particular vendor.
+
+### Container image
 
 The image runs as a non-root user, ships a `HEALTHCHECK` and honours
-`--proxy-headers` for correct HTTPS/HSTS detection behind a proxy. Mount a
-volume at `/data` to persist SQLite.
+`--proxy-headers` so HTTPS/HSTS detection works behind a proxy. Mount a volume
+at `/data` to persist SQLite:
+
+```bash
+docker build -t llm-router .
+docker run -d --name router -p 7860:7860 \
+  -e ADMIN_TOKEN=… -e SECRET_KEY=… \
+  -v llm-router-data:/data llm-router
+```
+
+Health probe endpoints: `/health` (liveness) and `/readyz` (readiness).
 
 ### Docker Compose
 
@@ -203,49 +220,83 @@ cp .env.example .env      # set ADMIN_TOKEN and SECRET_KEY
 docker compose up -d
 ```
 
-### Cloudflare Tunnel (optional)
+### Running behind a reverse proxy or tunnel (optional)
 
-**When you need it:** only for **self-hosted** deployments that must not open
-inbound ports (home/lab servers, NAT, no public IP), or when you want
-Cloudflare's WAF, DDoS protection and Zero Trust Access in front of the gateway.
+Put TLS and a hostname in front of the router using whatever you already run —
+nginx/Caddy/Traefik, a load balancer, a platform ingress, or a Cloudflare Tunnel.
+Then start the app with `--proxy-headers --forwarded-allow-ips=*` so it trusts
+`X-Forwarded-Proto` and emits HSTS.
 
-**When you don't:** managed hosts (Render, Fly, Cloud Run, Hugging Face Spaces)
-already terminate TLS and expose an HTTPS URL — a tunnel adds nothing there and
-an extra hop of latency.
-
-To enable it, create a tunnel in Cloudflare Zero Trust (**Networks → Tunnels**),
-copy its token into `TUNNEL_TOKEN`, and start the profile:
+A **Cloudflare Tunnel** is only needed for **self-hosted** deployments that must
+not open inbound ports (NAT, no public IP, home/lab servers) or when you want
+Cloudflare's WAF, DDoS protection and Zero Trust Access in front. It is *not*
+needed where the platform already terminates TLS. To enable it:
 
 ```bash
+cp deploy/cloudflared/config.example.yml deploy/cloudflared/config.yml
+# create a tunnel + DNS route in your Cloudflare Zero Trust dashboard
 docker compose --profile tunnel up -d
 ```
 
-With the tunnel you can drop the published `7860` port. A named-tunnel config
-example lives at `deploy/cloudflared/config.example.yml`.
+With the tunnel you can drop the published `7860` port.
 
-### Render (free) + UptimeRobot keep-alive
+### Managed / PaaS platforms
 
-1. Push to GitHub, then Render → **New → Blueprint** (uses `render.yaml`).
-2. Set `ADMIN_TOKEN` and `SECRET_KEY` (Render can generate them).
-3. **Free instances sleep after ~15 minutes idle.** An in-process self-ping
-   cannot wake a sleeping service, so use an **external** monitor:
-   - Create a free UptimeRobot **HTTP(s)** monitor.
-   - URL: `https://<your-app>.onrender.com/health` (or `/healthz`).
-   - Interval: **5 minutes** (free plan supports 5-minute checks).
-   - Expected: HTTP 200, keyword `ok`.
+When deploying to a platform that builds from source, use a **Dockerfile-based**
+builder if one is offered (the repo includes a `Dockerfile`); otherwise use a
+Python buildpack with:
 
-   The 5-minute cadence keeps the instance warm through the 15-minute idle
-   window, so cold starts become rare.
+- Build: `pip install -r requirements.txt`
+- Start: `uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=*`
+- Health check path: `/health`
 
-### Hugging Face Spaces
+Set `ADMIN_TOKEN`, `SECRET_KEY` and (if relevant) `ENV=production` as platform
+secrets. Expose the assigned port via the platform's routing — do not hard-code
+a hostname anywhere in config.
 
-Docker Spaces require a paid plan; **Static** Spaces are free but cannot run this
-server. If you do host it on a Docker Space:
+### Keeping an idle-sleeping instance warm
 
-1. New Space → SDK **Docker** → Blank; upload the repo.
-2. Space Settings → *Variables and secrets* → set `ADMIN_TOKEN`, `SECRET_KEY`.
-3. The filesystem is ephemeral — export your config, base64 it, and store it as
-   `BOOTSTRAP_CONFIG` so the router rebuilds itself on every cold boot.
+Many free tiers stop (sleep) an instance after a period of inactivity, which
+adds a cold start to the next request. An in-process self-ping cannot wake a
+sleeping process, so use an **external** uptime monitor:
+
+- Point an HTTP(S) monitor at `https://<your-host>/health` (or `/healthz`).
+- Use a check interval shorter than the platform's idle window (e.g. every
+  **5 minutes**).
+- Expected response: HTTP 200 with body containing `ok`.
+
+Any external monitor works (for example UptimeRobot or a scheduled job on
+another host). This keeps the instance warm; it does not change the tier's
+limits.
+
+### Ephemeral filesystems
+
+On platforms where the filesystem is wiped on restart, the SQLite file is not
+persistent. Keep configuration portable instead:
+
+```bash
+# after exporting config from the console (Settings → Export JSON)
+base64 -w0 llm-router-config.json
+```
+
+Store the output as `BOOTSTRAP_CONFIG`. On every cold boot the router rebuilds
+itself from that value. For durable storage, mount a volume, use a managed
+disk, or point `DB_PATH` at a persistent location.
+
+---
+
+## Operations
+
+- **Health**: `GET /health` for liveness, `GET /readyz` for readiness — wire
+  these into your platform's health checks and your uptime monitor.
+- **Logs**: the console's *Live traffic* view streams routing events over SSE.
+  The service also logs to stdout (safe for container log collectors).
+- **Backups**: the whole state is `DB_PATH`. Copy the file, or export config
+  JSON from the console.
+- **Key rotation**: add the new key, verify traffic, then remove the old one;
+  cooldowns are per key so rotation does not disturb sibling keys.
+- **Reset**: `POST /admin/api/keys/{id}/reset` clears a key's cooldown and
+  windows after you have fixed the underlying problem.
 
 ---
 
@@ -265,6 +316,28 @@ client ──▶ /v1/chat/completions
              │  client 4xx ──▶ pass through unchanged
              ▼
         2xx ──▶ stream or return, record usage, update health
+```
+
+---
+
+## Project layout
+
+```
+app/
+  main.py        FastAPI app, /v1 surface, admin API, static hosting
+  router.py      candidate resolution, ordering, failover execution
+  adapters.py    OpenAI / Anthropic / Gemini request + SSE translation
+  limiter.py     per-key RPM/TPM/concurrency governor and cooldowns
+  db.py          SQLite store, column allow-list, encryption hooks
+  security.py    constant-time compare, lockout, rate limit, URL validation
+  crypto.py      optional AES-256-GCM secret box
+  config.py      environment configuration
+  providers.py   provider presets
+  util.py        token estimation, SSE helpers, header parsing
+  static/        admin console (HTML/CSS/JS)
+tests/           pytest suite + mock upstream
+deploy/          example reverse-proxy / tunnel configuration
+Dockerfile, docker-compose.yml, .env.example, pyproject.toml
 ```
 
 ---

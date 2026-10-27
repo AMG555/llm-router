@@ -4,8 +4,8 @@
 # opening inbound ports (e.g. behind NAT or a home/lab server), or when you
 # want Cloudflare's WAF, DDoS protection and Zero Trust Access in front.
 #
-# Managed cloud hosts (Render, Fly, Cloud Run, HF Spaces) already terminate
-# TLS and give you a public HTTPS URL, so a tunnel is optional there.
+# If your platform already terminates TLS and gives you a public HTTPS URL,
+# a tunnel is optional and simply adds a hop.
 #
 # Named-tunnel setup:
 #   cloudflared tunnel login
