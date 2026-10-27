@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: llm-router
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: ADMIN_TOKEN
+        generateValue: true
+      - key: DB_PATH
+        value: ./data/router.db
+      - key: MAX_ATTEMPTS
+        value: "8"
+      - key: DEFAULT_COOLDOWN
+        value: "20"

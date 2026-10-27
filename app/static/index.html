@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LLM Router</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<aside>
+  <div class="brand"><span class="dot"></span> LLM<b>Router</b></div>
+  <nav>
+    <button data-tab="dash" class="active">Dashboard</button>
+    <button data-tab="models">Models</button>
+    <button data-tab="providers">Providers &amp; Keys</button>
+    <button data-tab="logs">Live Logs</button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+  <div class="base-url" id="baseUrl"></div>
+</aside>
+
+<main>
+  <section id="tab-dash" class="tab active">
+    <h1>Dashboard</h1>
+    <div class="cards" id="statCards"></div>
+    <h2>Key health</h2>
+    <div id="keyHealth" class="table-wrap"></div>
+  </section>
+
+  <section id="tab-models" class="tab">
+    <h1>Virtual models <button class="btn" onclick="modalNewModel()">+ New model</button></h1>
+    <p class="hint">A virtual model is the single name your app sends. It fans out to every target below it.</p>
+    <div id="models"></div>
+  </section>
+
+  <section id="tab-providers" class="tab">
+    <h1>Providers <button class="btn" onclick="modalNewProvider()">+ Add provider</button></h1>
+    <p class="hint">Add unlimited keys per provider. Each key has its own RPM/TPM budget and cooldown timer.</p>
+    <div id="providers"></div>
+  </section>
+
+  <section id="tab-logs" class="tab">
+    <h1>Live routing log <button class="btn ghost" onclick="api('/admin/api/logs',{method:'DELETE'}).then(refresh)">Clear</button></h1>
+    <div id="logFeed" class="feed"></div>
+  </section>
+
+  <section id="tab-settings" class="tab">
+    <h1>Settings</h1>
+    <h2>Gateway keys (give these to your apps)</h2>
+    <div id="gwKeys"></div>
+    <h2>Admin token</h2>
+    <input id="adminToken" placeholder="ADMIN_TOKEN" onchange="saveToken()">
+    <h2>Config</h2>
+    <div class="row">
+      <button class="btn" onclick="exportCfg()">Export JSON</button>
+      <label class="btn ghost">Import JSON<input type="file" hidden onchange="importCfg(this)"></label>
+    </div>
+  </section>
+</main>
+
+<div id="modalRoot"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
