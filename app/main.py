@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -16,11 +17,52 @@ from .db import Store
 from .limiter import Limiter
 from .providers import PRESETS, preset_headers
 from .router import NoCapacity, Router, UnknownModel
+from .security import (SECURITY_HEADERS, LockoutGuard, SlidingRateLimiter,
+                       const_eq, validate_upstream_url)
 
 BASE = Path(__file__).parent
 store = Store(settings.db_path)
 limiter = Limiter(settings)
-app = FastAPI(title="LLM Router", version="1.0.0")
+admin_guard = LockoutGuard(settings.admin_max_fails, settings.admin_lock_seconds)
+gw_limiter = SlidingRateLimiter(settings.gateway_rpm)
+
+app = FastAPI(
+    title="LLM Router",
+    version="1.1.0",
+    docs_url="/docs" if settings.enable_docs else None,
+    redoc_url="/redoc" if settings.enable_docs else None,
+    openapi_url="/openapi.json" if settings.enable_docs else None,
+)
+
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts or ["*"])
+if settings.cors:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[o.strip() for o in settings.cors.split(",") if o.strip()],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["authorization", "content-type", "x-admin-token", "x-api-key",
+                       "x-session-id", "x-route-sticky"],
+    )
+
+
+@app.middleware("http")
+async def harden(request: Request, call_next):
+    # reject oversized bodies before doing any work
+    cl = request.headers.get("content-length")
+    if cl and cl.isdigit() and int(cl) > settings.max_body_bytes:
+        return JSONResponse({"error": {"message": "Request body too large",
+                                       "type": "invalid_request_error"}}, status_code=413)
+    resp = await call_next(request)
+    for k, v in SECURITY_HEADERS.items():
+        resp.headers.setdefault(k, v)
+    https = (request.url.scheme == "https"
+             or request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https")
+    if settings.force_https or https:
+        resp.headers.setdefault("Strict-Transport-Security",
+                                "max-age=31536000; includeSubDomains")
+    resp.headers.setdefault("Cache-Control", "no-store")
+    return resp
 
 
 class Bus:
@@ -51,9 +93,6 @@ class Bus:
 bus = Bus()
 router = Router(store, limiter, settings, bus)
 
-app.add_middleware(CORSMiddleware, allow_origins=settings.cors.split(","),
-                   allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
-
 
 @app.on_event("startup")
 async def _startup():
@@ -69,6 +108,13 @@ async def _startup():
         store.insert("gateway_keys", {"label": "default", "key": key,
                                       "enabled": 1, "created_at": time.time()})
         print(f"\n=== NEW GATEWAY KEY: {key} ===\n")
+    if settings.admin_token_generated:
+        print(f"\n=== GENERATED ADMIN TOKEN: {settings.admin_token} ===")
+        print("Set ADMIN_TOKEN to a fixed value to keep it stable across restarts.\n")
+    if not settings.secret_key:
+        print("[warn] SECRET_KEY not set - stored upstream keys are NOT encrypted at rest.")
+    print(f"[security] env={settings.env} docs={'on' if settings.enable_docs else 'off'} "
+          f"cors={'on' if settings.cors else 'same-origin'} gateway_rpm={settings.gateway_rpm or 'unlimited'}")
     store.prune_logs(settings.max_log_rows)
 
 
@@ -77,9 +123,13 @@ async def _shutdown():
     await router.aclose()
 
 
-# ---------------- auth ----------------
+# ---------------- helpers ----------------
 def openai_error(message, code="invalid_request_error", status=400, type_="invalid_request_error"):
     return JSONResponse({"error": {"message": message, "type": type_, "code": code}}, status_code=status)
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
 
 
 def gateway_auth(request: Request):
@@ -90,36 +140,66 @@ def gateway_auth(request: Request):
     token = token or request.headers.get("x-api-key", "")
     if not token:
         raise HTTPException(401, "Missing API key")
-    if token in store.gateway or token == settings.admin_token:
-        return token
-    raise HTTPException(401, "Invalid API key")
+    match = False
+    for gk in store.gateway:
+        if const_eq(token, gk):
+            match = True
+    if const_eq(token, settings.admin_token):
+        match = True
+    if not match:
+        raise HTTPException(401, "Invalid API key")
+    if not gw_limiter.allow(token):
+        raise HTTPException(429, "Gateway rate limit exceeded")
+    return token
 
 
 def admin_auth(request: Request):
-    if not settings.admin_token:
-        return True
+    ident = _client_ip(request)
+    lock = admin_guard.locked_for(ident)
+    if lock:
+        raise HTTPException(429, f"Too many attempts. Try again in {lock}s")
     token = (request.headers.get("x-admin-token")
              or request.headers.get("authorization", "").replace("Bearer ", ""))
-    if token != settings.admin_token:
-        raise HTTPException(401, "Invalid admin token")
-    return True
+    if const_eq(token, settings.admin_token):
+        admin_guard.reset(ident)
+        return True
+    admin_guard.fail(ident)
+    raise HTTPException(401, "Invalid admin token")
 
 
 @app.exception_handler(HTTPException)
 async def http_exc(request: Request, exc: HTTPException):
     if request.url.path.startswith("/v1"):
-        return openai_error(str(exc.detail), code=str(exc.status_code), status=exc.status_code,
-                            type_="authentication_error" if exc.status_code == 401 else "invalid_request_error")
+        type_ = "rate_limit_error" if exc.status_code == 429 else (
+            "authentication_error" if exc.status_code in (401, 403) else "invalid_request_error")
+        return openai_error(str(exc.detail), code=str(exc.status_code),
+                            status=exc.status_code, type_=type_)
     return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 
 
-# ---------------- OpenAI-compatible surface ----------------
+@app.exception_handler(ValueError)
+async def value_exc(request: Request, exc: ValueError):
+    return JSONResponse({"detail": f"invalid input: {exc}"}, status_code=400)
+
+
+# ---------------- health ----------------
 @app.get("/health")
+@app.get("/healthz")
 async def health():
     return {"status": "ok", "models": len(store.vmodels), "providers": len(store.providers),
             "keys": len(store.keys), "time": time.time()}
 
 
+@app.get("/readyz")
+async def readyz():
+    try:
+        store.conn.execute("SELECT 1")
+        return {"status": "ready"}
+    except Exception:
+        return JSONResponse({"status": "not-ready"}, status_code=503)
+
+
+# ---------------- OpenAI-compatible surface ----------------
 @app.get("/v1/models")
 async def models(_=Depends(gateway_auth)):
     return {"object": "list", "data": [
@@ -144,12 +224,10 @@ async def _run(request: Request, stream_forced=False):
         return openai_error(str(e), code="no_capacity", status=429, type_="rate_limit_error")
 
     if res.stream is None:
-        return JSONResponse(res.data, status_code=res.status,
-                            headers=res.headers)
+        return JSONResponse(res.data, status_code=res.status, headers=res.headers)
     return StreamingResponse(res.stream, media_type="text/event-stream",
                              headers={**res.headers, "Cache-Control": "no-cache",
-                                      "X-Accel-Buffering": "no",
-                                      "Connection": "keep-alive"})
+                                      "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
 
 @app.post("/v1/chat/completions")
@@ -185,11 +263,11 @@ async def embeddings(request: Request, _=Depends(gateway_auth)):
             url, headers, payload, _ = adapter.build_embeddings(cand, body)
             r = await router.client.post(url, json=payload, headers=headers)
         except Exception:
-            limiter.cool(cand, 5, "network")
+            limiter.cool(cand, 5, "network", key_only=True)
             continue
         limiter.release(cand, 0, r.status_code)
         if r.status_code == 429:
-            limiter.cool(cand, util.parse_retry_after(r.headers, 20), "429")
+            limiter.cool(cand, util.parse_retry_after(r.headers, 20), "429", key_only=True)
             continue
         if r.status_code >= 400:
             continue
@@ -218,6 +296,8 @@ async def admin_state(_=Depends(admin_auth)):
         "logs": logs,
         "stats": _stats(),
         "health": health,
+        "meta": {"env": settings.env, "encryption": store.box.enabled,
+                 "gateway_rpm": settings.gateway_rpm},
     }
 
 
@@ -249,9 +329,11 @@ async def add_provider(request: Request, _=Depends(admin_auth)):
     if name in {p["name"] for p in store.providers.values()}:
         raise HTTPException(400, "provider name already exists")
     preset = b.get("preset") or "custom"
-    base_url = (b.get("base_url") or PRESETS.get(preset, {}).get("base_url") or "").strip()
-    if not base_url:
-        raise HTTPException(400, "base_url required")
+    raw_url = (b.get("base_url") or PRESETS.get(preset, {}).get("base_url") or "").strip()
+    try:
+        base_url = validate_upstream_url(raw_url, settings.block_private_upstreams)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     headers = b.get("headers") or preset_headers(preset)
     pid = store.insert("providers", {
         "name": name,
@@ -270,6 +352,11 @@ async def edit_provider(pid: int, request: Request, _=Depends(admin_auth)):
     b = await request.json()
     if "headers" in b and isinstance(b["headers"], dict):
         b["headers"] = json.dumps(b["headers"])
+    if "base_url" in b:
+        try:
+            b["base_url"] = validate_upstream_url(b["base_url"], settings.block_private_upstreams)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
     for k in ("enabled", "sticky"):
         if k in b:
             b[k] = 1 if b[k] else 0
@@ -311,9 +398,8 @@ async def add_key(request: Request, _=Depends(admin_auth)):
 @app.patch("/admin/api/keys/{kid}")
 async def edit_key(kid: int, request: Request, _=Depends(admin_auth)):
     b = await request.json()
-    for k in ("enabled",):
-        if k in b:
-            b[k] = 1 if b[k] else 0
+    if "enabled" in b:
+        b["enabled"] = 1 if b["enabled"] else 0
     for k in ("max_rpm", "max_tpm", "max_concurrency", "priority"):
         if k in b:
             b[k] = int(b[k] or 0)
@@ -346,9 +432,12 @@ async def add_vmodel(request: Request, _=Depends(admin_auth)):
     name = (b.get("name") or "").strip()
     if not name:
         raise HTTPException(400, "name required")
+    strategy = b.get("strategy") or "balanced"
+    if strategy not in ("balanced", "priority", "round_robin", "least_latency", "random"):
+        raise HTTPException(400, "invalid strategy")
     vid = store.insert("vmodels", {
         "name": name, "description": b.get("description", ""),
-        "strategy": b.get("strategy") or "balanced",
+        "strategy": strategy,
         "sticky": 1 if b.get("sticky", True) else 0,
         "enabled": 1, "created_at": time.time(),
     })
@@ -393,9 +482,8 @@ async def add_target(request: Request, _=Depends(admin_auth)):
 @app.patch("/admin/api/targets/{tid}")
 async def edit_target(tid: int, request: Request, _=Depends(admin_auth)):
     b = await request.json()
-    for k in ("enabled",):
-        if k in b:
-            b[k] = 1 if b[k] else 0
+    if "enabled" in b:
+        b["enabled"] = 1 if b["enabled"] else 0
     for k in ("max_rpm", "max_tpm", "priority"):
         if k in b:
             b[k] = int(b[k] or 0)
@@ -465,19 +553,20 @@ async def test_route(request: Request, _=Depends(admin_auth)):
 
 @app.get("/admin/api/logs")
 async def get_logs(limit: int = 200, _=Depends(admin_auth)):
-    return {"logs": store.rows("logs", "1=1 ORDER BY id DESC LIMIT ?", (min(limit, 2000),))}
+    return {"logs": store.rows("logs", "1=1 ORDER BY id DESC LIMIT ?", (max(1, min(limit, 2000)),))}
 
 
 @app.delete("/admin/api/logs")
 async def clear_logs(_=Depends(admin_auth)):
-    store.conn.execute("DELETE FROM logs")
-    store.conn.commit()
+    with store.lock:
+        store.conn.execute("DELETE FROM logs")
+        store.conn.commit()
     return {"ok": True}
 
 
 @app.get("/admin/api/stream")
 async def stream(request: Request, token: str = ""):
-    if settings.admin_token and token != settings.admin_token:
+    if not const_eq(token, settings.admin_token):
         raise HTTPException(401, "bad token")
     q = bus.subscribe()
 
@@ -498,7 +587,7 @@ async def stream(request: Request, token: str = ""):
 
 
 @app.get("/admin/api/export")
-async def export(reveal: int = 1, _=Depends(admin_auth)):
+async def export(reveal: int = 0, _=Depends(admin_auth)):
     data = {
         "providers": store.rows("providers"),
         "api_keys": store.rows("api_keys"),
@@ -509,6 +598,10 @@ async def export(reveal: int = 1, _=Depends(admin_auth)):
     if not reveal:
         for k in data["api_keys"]:
             k["api_key"] = util.mask(k["api_key"])
+        for g in data["gateway_keys"]:
+            g["key"] = util.mask(g["key"])
+        for p in data["providers"]:
+            p["headers"] = "{}"
     return data
 
 
@@ -516,6 +609,7 @@ def import_config(cfg: dict):
     idmap = {}
     for p in cfg.get("providers", []):
         old = p.pop("id", None)
+        p = {k: v for k, v in p.items()}
         p.setdefault("created_at", time.time())
         idmap[("providers", old)] = store.insert("providers", p)
     for k in cfg.get("api_keys", []):
@@ -548,9 +642,10 @@ def import_config(cfg: dict):
 async def do_import(request: Request, wipe: int = 0, _=Depends(admin_auth)):
     cfg = await request.json()
     if wipe:
-        for t in ("targets", "vmodels", "api_keys", "providers"):
-            store.conn.execute(f"DELETE FROM {t}")
-        store.conn.commit()
+        with store.lock:
+            for t in ("targets", "vmodels", "api_keys", "providers"):
+                store.conn.execute(f"DELETE FROM {t}")
+            store.conn.commit()
         store.load()
     import_config(cfg)
     return {"ok": True, "providers": len(store.providers), "models": len(store.vmodels)}

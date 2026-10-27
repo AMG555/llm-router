@@ -2,6 +2,9 @@ import sqlite3
 import threading
 from pathlib import Path
 
+from .config import settings
+from .crypto import SecretBox
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS providers(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,6 +68,21 @@ CREATE TABLE IF NOT EXISTS logs(
 CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts DESC);
 """
 
+# Columns a caller is allowed to write, per table. Anything else is rejected,
+# which closes SQL injection through attacker-controlled column names.
+COLUMNS = {
+    "providers": {"name", "adapter", "base_url", "headers", "notes", "enabled", "created_at"},
+    "api_keys": {"provider_id", "label", "api_key", "enabled", "weight", "priority",
+                 "max_rpm", "max_tpm", "max_concurrency", "created_at"},
+    "vmodels": {"name", "description", "strategy", "sticky", "enabled", "created_at"},
+    "targets": {"vmodel_id", "provider_id", "key_id", "upstream_model", "weight",
+                "priority", "max_rpm", "max_tpm", "enabled", "created_at"},
+    "gateway_keys": {"label", "key", "enabled", "created_at"},
+}
+
+# Fields encrypted at rest when SECRET_KEY is configured.
+SENSITIVE = {"api_keys": {"api_key"}, "gateway_keys": {"key"}, "providers": {"headers"}}
+
 
 class Store:
     """SQLite persistence + hot in-memory registry used by the router."""
@@ -72,6 +90,7 @@ class Store:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.box = SecretBox(settings.secret_key)
         self.lock = threading.RLock()
         self.conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
@@ -86,22 +105,53 @@ class Store:
         self.gateway = set()
         self.load()
 
+    # ---------- validation / crypto ----------
+    @staticmethod
+    def _sanitize(table, data: dict, allow_id=False) -> dict:
+        if table not in COLUMNS:
+            raise ValueError(f"unknown table: {table}")
+        allowed = COLUMNS[table] | ({"id"} if allow_id else set())
+        clean = {}
+        for k, v in data.items():
+            if k not in allowed:
+                raise ValueError(f"unknown column '{k}' for table '{table}'")
+            clean[k] = v
+        return clean
+
+    def _encrypt_row(self, table, data: dict) -> dict:
+        fields = SENSITIVE.get(table, set())
+        for f in fields:
+            if f in data and isinstance(data[f], str):
+                data[f] = self.box.encrypt(data[f])
+        return data
+
+    def _decrypt_row(self, table, data: dict) -> dict:
+        fields = SENSITIVE.get(table, set())
+        for f in fields:
+            if f in data and isinstance(data[f], str):
+                data[f] = self.box.decrypt(data[f])
+        return data
+
     # ---------- cache ----------
     def load(self):
         with self.lock:
-            self.providers = {r["id"]: dict(r) for r in self.conn.execute("SELECT * FROM providers")}
-            self.keys = {r["id"]: dict(r) for r in self.conn.execute("SELECT * FROM api_keys")}
+            self.providers = {r["id"]: self._decrypt_row("providers", dict(r))
+                              for r in self.conn.execute("SELECT * FROM providers")}
+            self.keys = {r["id"]: self._decrypt_row("api_keys", dict(r))
+                         for r in self.conn.execute("SELECT * FROM api_keys")}
             self.keys_by_provider = {}
             for k in self.keys.values():
                 self.keys_by_provider.setdefault(k["provider_id"], []).append(k)
             self.vmodels = {r["name"]: dict(r) for r in self.conn.execute("SELECT * FROM vmodels")}
             self.vmodels_by_id = {v["id"]: v for v in self.vmodels.values()}
             self.targets = [dict(r) for r in self.conn.execute("SELECT * FROM targets")]
-            self.gateway = {r["key"] for r in self.conn.execute(
+            self.gateway = {self.box.decrypt(r["key"]) for r in self.conn.execute(
                 "SELECT key FROM gateway_keys WHERE enabled=1")}
 
     # ---------- crud ----------
     def insert(self, table, data: dict):
+        data = self._sanitize(table, data)
+        data = self._encrypt_row(table, dict(data))
         cols = ",".join(data.keys())
         ph = ",".join("?" * len(data))
         with self.lock:
@@ -112,8 +162,10 @@ class Store:
             return cur.lastrowid
 
     def update(self, table, rid, data: dict):
+        data = self._sanitize(table, data)
         if not data:
             return
+        data = self._encrypt_row(table, dict(data))
         sets = ",".join(f"{k}=?" for k in data)
         with self.lock:
             self.conn.execute(f"UPDATE {table} SET {sets} WHERE id=?", [*data.values(), rid])
@@ -131,14 +183,17 @@ class Store:
             self.conn.commit()
             self.load()
 
-    def rows(self, table, where="", args=()):
+    def rows(self, table, where="", args=(), reveal=False):
         sql = f"SELECT * FROM {table}"
         if where:
             sql += f" WHERE {where}"
-        return [dict(r) for r in self.conn.execute(sql, args)]
+        out = [dict(r) for r in self.conn.execute(sql, args)]
+        if table in SENSITIVE:
+            out = [self._decrypt_row(table, r) for r in out]
+        return out
 
     def log(self, **kw):
-        if not settings_log_enabled():
+        if not settings.log_requests:
             return
         with self.lock:
             self.conn.execute(
@@ -156,8 +211,3 @@ class Store:
                 "DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT ?)",
                 (keep,))
             self.conn.commit()
-
-
-def settings_log_enabled():
-    from .config import settings
-    return settings.log_requests
