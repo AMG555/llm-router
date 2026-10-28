@@ -697,15 +697,24 @@ async def export(reveal: int = 0, _=Depends(admin_auth)):
     return data
 
 
+def _reject_masked(value: str, field: str):
+    if isinstance(value, str) and ("***" in value or "..." in value):
+        raise ValueError(
+            f"refusing to import a masked {field}; export with reveal=1")
+
+
 def import_config(cfg: dict):
     idmap = {}
     for p in cfg.get("providers", []):
         old = p.pop("id", None)
         p = {k: v for k, v in p.items()}
+        if p.get("proxy"):
+            _reject_masked(p["proxy"], "proxy")
         p.setdefault("created_at", time.time())
         idmap[("providers", old)] = store.insert("providers", p)
     for k in cfg.get("api_keys", []):
         old = k.pop("id", None)
+        _reject_masked(k.get("api_key", ""), "API key")
         k["provider_id"] = idmap.get(("providers", k["provider_id"]), k["provider_id"])
         k.setdefault("created_at", time.time())
         idmap[("api_keys", old)] = store.insert("api_keys", k)
@@ -723,6 +732,7 @@ def import_config(cfg: dict):
         store.insert("targets", t)
     for g in cfg.get("gateway_keys", []):
         g.pop("id", None)
+        _reject_masked(g.get("key", ""), "gateway key")
         g.setdefault("created_at", time.time())
         try:
             store.insert("gateway_keys", g)

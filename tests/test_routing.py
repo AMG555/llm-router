@@ -75,6 +75,32 @@ def test_embeddings_endpoint(client, gw_h, make_model):
     assert r.status_code == 200 and r.json()["data"][0]["embedding"]
 
 
+def _cfg_with_key(key, name):
+    return {
+        "providers": [{"id": 0, "name": name, "adapter": "openai",
+                       "base_url": "https://api.example.com/v1", "headers": "{}",
+                       "proxy": "", "notes": "", "enabled": 1, "created_at": 1}],
+        "api_keys": [{"id": 0, "provider_id": 0, "label": "k", "api_key": key,
+                      "enabled": 1, "weight": 1, "priority": 100, "max_rpm": 0,
+                      "max_tpm": 0, "max_concurrency": 0, "created_at": 1}],
+        "vmodels": [], "targets": [], "gateway_keys": [],
+    }
+
+
+def test_import_rejects_masked_export(client, admin_h):
+    r = client.post("/admin/api/import?wipe=0", headers=admin_h,
+                    json=_cfg_with_key("sk-abc...wxyz", "imp-masked"))
+    assert r.status_code == 400
+    assert "masked" in r.json()["detail"].lower()
+
+
+def test_import_accepts_revealed_export(client, admin_h):
+    import uuid
+    r = client.post("/admin/api/import?wipe=0", headers=admin_h,
+                    json=_cfg_with_key("sk-realvalue123456", "imp-" + uuid.uuid4().hex[:8]))
+    assert r.status_code == 200
+
+
 def test_unknown_model_shape(client, gw_h):
     r = client.post("/v1/chat/completions", headers=gw_h, json={
         "model": "nope", "messages": [{"role": "user", "content": "hi"}]})
