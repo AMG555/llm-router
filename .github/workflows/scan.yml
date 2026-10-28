@@ -1,0 +1,19 @@
+name: container-scan
+
+# Separate from CI so a scanner/registry hiccup can never fail a push.
+# Runs weekly and on demand. Advisory (exit-code 0).
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * 1"
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t llm-router:ci .
+      - name: Scan image (Trivy)
+        run: docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasecurity/trivy:latest image --severity CRITICAL,HIGH --ignore-unfixed --exit-code 0 llm-router:ci

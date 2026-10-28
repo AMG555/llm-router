@@ -22,17 +22,3 @@ jobs:
         run: pip-audit -r requirements.txt
       - name: Run tests
         run: python -m pytest -q
-
-  image:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build image
-        run: docker build -t llm-router:ci .
-      - name: Scan image (Trivy)
-        # Advisory: reports CRITICAL/HIGH and never fails the build.
-        # Change --exit-code to 1 to make it enforcing.
-        run: |
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-            aquasecurity/trivy:latest image \
-            --severity CRITICAL,HIGH --ignore-unfixed --exit-code 0 llm-router:ci
