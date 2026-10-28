@@ -94,6 +94,16 @@ bus = Bus()
 router = Router(store, limiter, settings, bus)
 
 
+def register_gateway_key(key: str, label: str = "env") -> bool:
+    """Add a gateway key if it is not already present. Returns True if added."""
+    key = (key or "").strip()
+    if not key or key in store.gateway:
+        return False
+    store.insert("gateway_keys", {"label": label, "key": key, "enabled": 1,
+                                  "created_at": time.time()})
+    return True
+
+
 @app.on_event("startup")
 async def _startup():
     bus.bind(asyncio.get_running_loop())
@@ -103,6 +113,9 @@ async def _startup():
             import_config(cfg)
         except Exception as e:
             print("bootstrap failed:", e)
+    if settings.gateway_key:
+        if register_gateway_key(settings.gateway_key, "env"):
+            print("[gateway] registered GATEWAY_KEY from environment")
     if not store.gateway:
         key = "sk-router-" + secrets.token_urlsafe(24)
         store.insert("gateway_keys", {"label": "default", "key": key,

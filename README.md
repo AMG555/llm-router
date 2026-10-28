@@ -110,6 +110,7 @@ All configuration is environment variables (see `.env.example`).
 | `DB_PATH` | `./data/router.db` | SQLite location (persist this). |
 | `REQUIRE_GATEWAY_AUTH` | `true` | Require a key on `/v1`. |
 | `GATEWAY_RPM` | `0` | Per gateway-key requests/minute (0 = unlimited). |
+| `GATEWAY_KEY` | — | Fixed client key registered at boot (stable across restarts). |
 | `MAX_BODY_BYTES` | `2097152` | Reject oversized request bodies with 413. |
 | `CORS_ORIGINS` | *(empty)* | Comma list; empty means same-origin only. |
 | `TRUSTED_HOSTS` | `*` | Allowed `Host` header values. |
@@ -295,6 +296,9 @@ base64 -w0 llm-router-config.json
 Store the output as `BOOTSTRAP_CONFIG`. On every cold boot the router rebuilds
 itself from that value. For durable storage, mount a volume, use a managed
 disk, or point `DB_PATH` at a persistent location.
+
+Also set `GATEWAY_KEY` to a fixed value so your applications keep the same key
+across restarts (otherwise a fresh one is generated on each cold boot).
 
 ---
 ## Operations

@@ -30,6 +30,15 @@ def test_gateway_accepts_valid_key(client, gw_h):
     assert client.get("/v1/models", headers=gw_h).status_code == 200
 
 
+def test_env_gateway_key_registration(client, app_module):
+    from app.main import register_gateway_key
+    k = "sk-router-envkey-test-123456"
+    assert register_gateway_key(k, "env") is True
+    assert k in app_module.store.gateway
+    assert register_gateway_key(k, "env") is False  # idempotent
+    assert client.get("/v1/models", headers={"Authorization": f"Bearer {k}"}).status_code == 200
+
+
 def test_admin_requires_token(client):
     assert client.get("/admin/api/state").status_code == 401
     assert client.get("/admin/api/state", headers={"x-admin-token": "nope"}).status_code == 401

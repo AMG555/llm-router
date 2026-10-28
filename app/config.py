@@ -31,6 +31,9 @@ class Settings:
         self.require_auth = _bool(os.getenv("REQUIRE_GATEWAY_AUTH"), True)
         self.gateway_rpm = int(os.getenv("GATEWAY_RPM", "0"))  # 0 = unlimited
         self.max_body_bytes = int(os.getenv("MAX_BODY_BYTES", "2097152"))
+        # Optional fixed client-facing key. Recommended on hosts with an
+        # ephemeral filesystem so the gateway key survives restarts.
+        self.gateway_key = os.getenv("GATEWAY_KEY", "").strip()
 
         # --- web hardening ---
         self.cors = os.getenv("CORS_ORIGINS", "").strip()  # empty => same-origin only
