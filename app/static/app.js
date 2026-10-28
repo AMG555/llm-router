@@ -285,6 +285,8 @@ const HANDLERS = {
   "toggle-target": (el) => api(`/admin/api/targets/${el.dataset.id}`, { method: "PATCH", body: { enabled: +el.dataset.next } }).then(refresh),
   "del-target": (el) => confirmDialog("Remove this target?", { confirmLabel: "Remove" }).then((ok) => ok && api(`/admin/api/targets/${el.dataset.id}`, { method: "DELETE" }).then(refresh)),
   "del-gw": (el) => confirmDialog("Revoke this gateway key? Clients using it will stop working.", { confirmLabel: "Revoke" }).then((ok) => ok && api(`/admin/api/gateway-keys/${el.dataset.id}`, { method: "DELETE" }).then(refresh)),
+  "new-admin-token": () => adminTokenModal(),
+  "del-admin-token": (el) => confirmDialog("Revoke this admin user?", { confirmLabel: "Revoke" }).then((ok) => ok && api(`/admin/api/admin-tokens/${el.dataset.id}`, { method: "DELETE" }).then(refresh)),
   "copy-key": (el) => copy(el.dataset.value, "Key copied"),
 };
 
@@ -470,6 +472,45 @@ function newTargetModal(vid) {
 }
 
 /* ---------------- actions ---------------- */
+function adminTokenModal() {
+  formDialog({
+    title: "Add admin user",
+    sub: "Viewers can read configuration; admins can change it.",
+    submitLabel: "Create",
+    body: `
+      <div class="field"><label for="atLabel">Label</label><input id="atLabel" placeholder="ops@example"></div>
+      <div class="field"><label for="atRole">Role</label><select id="atRole">
+        <option value="viewer">viewer — read only</option>
+        <option value="admin">admin — full access</option></select></div>`,
+    onSubmit: async (modal) => {
+      const r = await api("/admin/api/admin-tokens", { method: "POST", body: {
+        label: $("#atLabel", modal).value.trim(), role: $("#atRole", modal).value }});
+      toast("Admin user created", "", "ok");
+      copy(r.token, "Token copied to clipboard");
+    },
+  });
+}
+
+function renderTeam() {
+  const toks = STATE.admin_tokens || [];
+  const rows = toks.map((t) => `<tr>
+      <td>${esc(t.label)}</td><td>${esc(t.role)}</td>
+      <td>${t.enabled ? '<span class="pill ok">enabled</span>' : '<span class="pill off">disabled</span>'}</td>
+      <td class="r"><button class="btn sm danger" data-action="del-admin-token" data-id="${t.id}">Revoke</button></td>
+    </tr>`).join("");
+  $("#adminTokens").innerHTML = `<table><thead><tr><th>Label</th><th>Role</th><th>State</th><th></th></tr></thead>
+    <tbody>${rows || emptyRow(4, "Only the shared ADMIN_TOKEN is configured.")}</tbody></table>`;
+
+  const audit = STATE.audit || [];
+  const arows = audit.map((a) => `<tr>
+      <td class="mono">${esc(clockTime(a.ts))}</td><td>${esc(a.actor)}</td>
+      <td class="muted">${esc(a.role)}</td>
+      <td class="mono">${esc(a.action)} ${esc(a.target)}</td>
+      <td class="mono muted">${esc(a.ip)}</td></tr>`).join("");
+  $("#audit").innerHTML = `<table><thead><tr><th>Time</th><th>Actor</th><th>Role</th><th>Action</th><th>IP</th></tr></thead>
+    <tbody>${arows || emptyRow(5, "No admin activity yet.")}</tbody></table>`;
+}
+
 async function gwKeyModal(g) {
   const editing = !!g;
   formDialog({
@@ -735,6 +776,7 @@ function renderSettings() {
   const meta = STATE.meta || {};
   $("#envChip").innerHTML = `env <b>${esc(meta.env || "—")}</b>`;
   $("#encChip").innerHTML = `at-rest <b>${meta.encryption ? "encrypted" : "plaintext"}</b>`;
+  $("#roleChip").innerHTML = `role <b>${esc(STATE.role || "admin")}</b>`;
   $("#diagEnv").textContent = meta.env || "—";
   $("#diagEnc").textContent = meta.encryption ? "AES-256-GCM" : "plaintext (SECRET_KEY unset)";
   $("#diagRpm").textContent = meta.gateway_rpm ? meta.gateway_rpm + " rpm" : "unlimited";
@@ -830,7 +872,7 @@ async function refresh() {
     hideOffline();
     if (!UI.seeded) { seedFeed(); UI.seeded = true; }
     renderKpis(); renderKeyHealth(); renderRecent(); renderModels();
-    renderProviders(); renderGwKeys(); renderSettings(); renderFoot();
+    renderProviders(); renderGwKeys(); renderSettings(); renderFoot(); renderTeam();
     if (UI.route === "traffic") renderFeed();
   } catch (err) {
     if (err instanceof AuthError) { setConn("locked"); if ($("#modalRoot").hidden) openTokenModal(); }

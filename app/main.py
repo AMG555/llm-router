@@ -22,7 +22,8 @@ from .observability import (AUTH_FAILURES, ObservabilityMiddleware, log_event,
 from .providers import PRESETS, preset_headers
 from .router import NoCapacity, Router, UnknownModel
 from .security import (SECURITY_HEADERS, KeyedRateLimiter, LockoutGuard,
-                       SlidingRateLimiter, const_eq, validate_upstream_url)
+                       SlidingRateLimiter, const_eq, hash_token,
+                       validate_upstream_url)
 
 BASE = Path(__file__).parent
 store = Store(settings.db_path)
@@ -234,6 +235,16 @@ def _model_allowed(gw, model) -> bool:
     return model in {m.strip() for m in allowed.split(",") if m.strip()}
 
 
+def _admin_identity(token: str):
+    """Resolve an admin token to {actor, role}, or None."""
+    if const_eq(token, settings.admin_token):
+        return {"actor": "root", "role": "admin"}
+    rec = store.admin_tokens.get(hash_token(token or ""))
+    if rec:
+        return {"actor": rec["label"] or f"token#{rec['id']}", "role": rec["role"]}
+    return None
+
+
 def admin_auth(request: Request):
     ident = _client_ip(request)
     lock = admin_guard.locked_for(ident)
@@ -241,13 +252,21 @@ def admin_auth(request: Request):
         raise HTTPException(429, f"Too many attempts. Try again in {lock}s")
     token = (request.headers.get("x-admin-token")
              or request.headers.get("authorization", "").replace("Bearer ", ""))
-    if const_eq(token, settings.admin_token):
-        admin_guard.reset(ident)
-        return True
-    admin_guard.fail(ident)
-    AUTH_FAILURES.labels("admin").inc()
-    log_event("warn", "auth_failed", surface="admin", ip=ident)
-    raise HTTPException(401, "Invalid admin token")
+    who = _admin_identity(token)
+    if not who:
+        admin_guard.fail(ident)
+        AUTH_FAILURES.labels("admin").inc()
+        log_event("warn", "auth_failed", surface="admin", ip=ident)
+        raise HTTPException(401, "Invalid admin token")
+    admin_guard.reset(ident)
+    mutating = request.method not in ("GET", "HEAD", "OPTIONS")
+    if mutating and who["role"] != "admin":
+        log_event("warn", "forbidden", actor=who["actor"], role=who["role"],
+                  method=request.method, path=request.url.path)
+        raise HTTPException(403, "admin role required")
+    if mutating:
+        store.audit(who["actor"], who["role"], request.method, request.url.path, "", ident)
+    return who
 
 
 @app.exception_handler(HTTPException)
@@ -384,10 +403,15 @@ async def embeddings(request: Request, gw=Depends(gateway_auth)):
 
 # ---------------- admin API ----------------
 @app.get("/admin/api/state")
-async def admin_state(_=Depends(admin_auth)):
+async def admin_state(who=Depends(admin_auth)):
     health = limiter.health()
     logs = store.rows("logs", "1=1 ORDER BY id DESC LIMIT 50")
     return {
+        "role": who["role"],
+        "actor": who["actor"],
+        "admin_tokens": [{"id": r["id"], "label": r["label"], "role": r["role"],
+                          "enabled": r["enabled"]} for r in store.rows("admin_tokens")],
+        "audit": store.rows("audit_log", "1=1 ORDER BY id DESC LIMIT 20"),
         "providers": [{**p, "proxy": util.mask_proxy(p.get("proxy") or ""),
                        "proxy_set": bool(p.get("proxy")),
                        "key_count": len(store.keys_by_provider.get(p["id"], []))}
@@ -707,6 +731,44 @@ async def del_gateway_key(gid: int, _=Depends(admin_auth)):
     return {"ok": True}
 
 
+# ---------------- RBAC: admin users + audit ----------------
+@app.post("/admin/api/admin-tokens")
+async def add_admin_token(request: Request, _=Depends(admin_auth)):
+    b = await request.json()
+    role = b.get("role") or "admin"
+    if role not in ("admin", "viewer"):
+        raise HTTPException(400, "invalid role")
+    token = b.get("token") or ("adm-" + secrets.token_urlsafe(24))
+    tid = store.insert("admin_tokens", {
+        "label": b.get("label") or "user", "token_hash": hash_token(token),
+        "role": role, "enabled": 1, "created_at": time.time()})
+    log_event("info", "admin_token_created", role=role)
+    return {"id": tid, "token": token, "role": role}
+
+
+@app.patch("/admin/api/admin-tokens/{tid}")
+async def edit_admin_token(tid: int, request: Request, _=Depends(admin_auth)):
+    b = await request.json()
+    if "enabled" in b:
+        b["enabled"] = 1 if b["enabled"] else 0
+    if "role" in b and b["role"] not in ("admin", "viewer"):
+        raise HTTPException(400, "invalid role")
+    store.update("admin_tokens", tid, b)
+    return {"ok": True}
+
+
+@app.delete("/admin/api/admin-tokens/{tid}")
+async def del_admin_token(tid: int, _=Depends(admin_auth)):
+    store.delete("admin_tokens", tid)
+    return {"ok": True}
+
+
+@app.get("/admin/api/audit")
+async def get_audit(limit: int = 200, _=Depends(admin_auth)):
+    rows = store.rows("audit_log", "1=1 ORDER BY id DESC LIMIT ?", (max(1, min(limit, 1000)),))
+    return {"audit": rows}
+
+
 @app.post("/admin/api/test")
 async def test_route(request: Request, _=Depends(admin_auth)):
     b = await request.json()
@@ -746,7 +808,7 @@ async def clear_logs(_=Depends(admin_auth)):
 
 @app.get("/admin/api/stream")
 async def stream(request: Request, token: str = ""):
-    if not const_eq(token, settings.admin_token):
+    if not _admin_identity(token):
         raise HTTPException(401, "bad token")
     q = bus.subscribe()
 
