@@ -44,4 +44,11 @@ class SecretBox:
             return value
         raw = base64.b64decode(value[len(_PREFIX):])
         nonce, ct = raw[:12], raw[12:]
-        return self.aead.decrypt(nonce, ct, None).decode("utf-8")
+        try:
+            return self.aead.decrypt(nonce, ct, None).decode("utf-8")
+        except Exception as e:  # InvalidTag / malformed ciphertext
+            raise RuntimeError(
+                "Could not decrypt a stored secret: SECRET_KEY does not match the "
+                "value used when this data was encrypted. Restore the original "
+                "SECRET_KEY, or remove the database (DB_PATH) to start fresh."
+            ) from e

@@ -104,3 +104,11 @@ def test_secretbox_disabled_passthrough():
     assert not box.enabled
     assert box.encrypt("plain") == "plain"
     assert box.decrypt("plain") == "plain"
+
+
+def test_secretbox_wrong_key_raises_clear_error():
+    import pytest
+    token = SecretBox("key-one").encrypt("sk-secret")
+    with pytest.raises(RuntimeError) as err:
+        SecretBox("key-two").decrypt(token)
+    assert "SECRET_KEY" in str(err.value)
