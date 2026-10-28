@@ -205,6 +205,7 @@ avoid an egress proxy unless you need IP pinning.
 pip install -r requirements-dev.txt
 python -m pytest -q              # full suite
 python -m pytest --cov=app       # with coverage
+pip-audit -r requirements.txt    # dependency vulnerability scan
 ```
 
 The suite runs against a local mock upstream (no network, no real keys) and

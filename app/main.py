@@ -3,6 +3,7 @@ import base64
 import json
 import secrets
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -26,9 +27,42 @@ limiter = Limiter(settings)
 admin_guard = LockoutGuard(settings.admin_max_fails, settings.admin_lock_seconds)
 gw_limiter = SlidingRateLimiter(settings.gateway_rpm)
 
+@asynccontextmanager
+async def lifespan(app):
+    bus.bind(asyncio.get_running_loop())
+    if settings.bootstrap and not store.providers:
+        try:
+            cfg = json.loads(base64.b64decode(settings.bootstrap).decode())
+            import_config(cfg)
+        except Exception as e:
+            print("bootstrap failed:", e)
+    if settings.gateway_key:
+        if register_gateway_key(settings.gateway_key, "env"):
+            print("[gateway] registered GATEWAY_KEY from environment")
+    if not store.gateway:
+        key = "sk-router-" + secrets.token_urlsafe(24)
+        store.insert("gateway_keys", {"label": "default", "key": key,
+                                      "enabled": 1, "created_at": time.time()})
+        print(f"\n=== NEW GATEWAY KEY: {key} ===\n")
+    if settings.admin_token_generated:
+        print(f"\n=== GENERATED ADMIN TOKEN: {settings.admin_token} ===")
+        print("Set ADMIN_TOKEN to a fixed value to keep it stable across restarts.\n")
+    if not settings.secret_key:
+        print("[warn] SECRET_KEY not set - stored upstream keys are NOT encrypted at rest.")
+    print(f"[security] env={settings.env} docs={'on' if settings.enable_docs else 'off'} "
+          f"cors={'on' if settings.cors else 'same-origin'} gateway_rpm={settings.gateway_rpm or 'unlimited'}")
+    store.prune_logs(settings.max_log_rows)
+    try:
+        yield
+    finally:
+        store.flush_logs()
+        await router.aclose()
+
+
 app = FastAPI(
     title="LLM Router",
     version="1.1.0",
+    lifespan=lifespan,
     docs_url="/docs" if settings.enable_docs else None,
     redoc_url="/redoc" if settings.enable_docs else None,
     openapi_url="/openapi.json" if settings.enable_docs else None,
@@ -130,39 +164,6 @@ def register_gateway_key(key: str, label: str = "env") -> bool:
     store.insert("gateway_keys", {"label": label, "key": key, "enabled": 1,
                                   "created_at": time.time()})
     return True
-
-
-@app.on_event("startup")
-async def _startup():
-    bus.bind(asyncio.get_running_loop())
-    if settings.bootstrap and not store.providers:
-        try:
-            cfg = json.loads(base64.b64decode(settings.bootstrap).decode())
-            import_config(cfg)
-        except Exception as e:
-            print("bootstrap failed:", e)
-    if settings.gateway_key:
-        if register_gateway_key(settings.gateway_key, "env"):
-            print("[gateway] registered GATEWAY_KEY from environment")
-    if not store.gateway:
-        key = "sk-router-" + secrets.token_urlsafe(24)
-        store.insert("gateway_keys", {"label": "default", "key": key,
-                                      "enabled": 1, "created_at": time.time()})
-        print(f"\n=== NEW GATEWAY KEY: {key} ===\n")
-    if settings.admin_token_generated:
-        print(f"\n=== GENERATED ADMIN TOKEN: {settings.admin_token} ===")
-        print("Set ADMIN_TOKEN to a fixed value to keep it stable across restarts.\n")
-    if not settings.secret_key:
-        print("[warn] SECRET_KEY not set - stored upstream keys are NOT encrypted at rest.")
-    print(f"[security] env={settings.env} docs={'on' if settings.enable_docs else 'off'} "
-          f"cors={'on' if settings.cors else 'same-origin'} gateway_rpm={settings.gateway_rpm or 'unlimited'}")
-    store.prune_logs(settings.max_log_rows)
-
-
-@app.on_event("shutdown")
-async def _shutdown():
-    store.flush_logs()
-    await router.aclose()
 
 
 # ---------------- helpers ----------------

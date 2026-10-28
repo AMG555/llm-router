@@ -1,6 +1,7 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
+fastapi==0.162.0
+starlette==1.10.0
+uvicorn[standard]==0.54.0
 httpx==0.28.1
-pydantic==2.10.4
-python-multipart==0.0.20
-cryptography==44.0.0
+pydantic==2.14.1
+python-multipart==0.0.32
+cryptography==50.0.2
