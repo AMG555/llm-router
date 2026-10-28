@@ -111,6 +111,43 @@ class SlidingRateLimiter:
         return max(0, self.limit - self.usage(key))
 
 
+class KeyedRateLimiter:
+    """Sliding-window limiter whose per-key limit is supplied per call.
+
+    Used for per-gateway-key quotas, where each key carries its own rpm.
+    """
+
+    def __init__(self, window: float = WINDOW):
+        self.window = window
+        self._hits = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: str, limit: int) -> bool:
+        if not limit or limit <= 0:
+            return True
+        now = time.time()
+        with self._lock:
+            dq = self._hits.setdefault(key, deque())
+            cutoff = now - self.window
+            while dq and dq[0] < cutoff:
+                dq.popleft()
+            if len(dq) >= limit:
+                return False
+            dq.append(now)
+            return True
+
+    def usage(self, key: str) -> int:
+        now = time.time()
+        with self._lock:
+            dq = self._hits.get(key)
+            if not dq:
+                return 0
+            cutoff = now - self.window
+            while dq and dq[0] < cutoff:
+                dq.popleft()
+            return len(dq)
+
+
 def validate_upstream_url(url: str, block_private: bool = False) -> str:
     """Return a normalized base URL or raise ValueError."""
     if not url or not isinstance(url, str):

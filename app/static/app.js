@@ -168,7 +168,7 @@ const ACTIONS = {
   "act-new-model": { group: "Action", label: "Create virtual model", run: () => newModelModal() },
   "act-new-provider": { group: "Action", label: "Add provider", run: () => newProviderModal() },
   "act-bulk": { group: "Action", label: "Bulk add keys", run: () => bulkKeysModal() },
-  "act-gwkey": { group: "Action", label: "Generate gateway key", run: () => genGatewayKey() },
+  "act-gwkey": { group: "Action", label: "Generate gateway key", run: () => gwKeyModal(null) },
   "act-export": { group: "Action", label: "Export configuration", run: () => exportConfig() },
   "act-theme": { group: "Action", label: "Toggle color theme", run: () => toggleTheme() },
   "act-refresh": { group: "Action", label: "Refresh now", run: () => refresh() },
@@ -262,7 +262,8 @@ const HANDLERS = {
   "new-model": () => newModelModal(),
   "new-provider": () => newProviderModal(),
   "bulk-keys": () => bulkKeysModal(),
-  "new-gw-key": () => genGatewayKey(),
+  "new-gw-key": () => gwKeyModal(null),
+  "edit-gw": (el) => { const g = (STATE.gateway_keys || []).find((x) => x.id === +el.dataset.id); if (g) gwKeyModal(g); },
   "save-token": () => { localStorage.setItem(TOKEN_KEY, $("#adminToken").value.trim()); toast("Token saved", "", "ok"); refresh(); connectStream(); },
   "export-config": () => exportConfig(),
   "import-config": () => $("#importFile").click(),
@@ -469,10 +470,33 @@ function newTargetModal(vid) {
 }
 
 /* ---------------- actions ---------------- */
-async function genGatewayKey() {
-  const r = await api("/admin/api/gateway-keys", { method: "POST", body: { label: "client" } });
-  await refresh();
-  copy(r.key, "New key generated and copied");
+async function gwKeyModal(g) {
+  const editing = !!g;
+  formDialog({
+    title: editing ? "Edit gateway key" : "Generate gateway key",
+    sub: editing ? "Update the scope and quota for this key."
+                 : "Optionally restrict which models it may call and cap its rate.",
+    submitLabel: editing ? "Save" : "Generate",
+    body: `
+      <div class="field"><label for="gkLabel">Label</label><input id="gkLabel" value="${esc(g ? g.label : "")}" placeholder="client"></div>
+      <div class="field"><label for="gkModels">Allowed models</label><input id="gkModels" value="${esc(g ? g.allowed_models : "")}" placeholder="empty = all models"><div class="help">Comma-separated virtual model names.</div></div>
+      <div class="field"><label for="gkRpm">Max requests / minute</label><input id="gkRpm" type="number" value="${esc(g ? g.max_rpm : 0)}"><div class="help">0 = unlimited.</div></div>`,
+    onSubmit: async (modal) => {
+      const body = {
+        label: $("#gkLabel", modal).value.trim(),
+        allowed_models: $("#gkModels", modal).value.trim(),
+        max_rpm: parseInt($("#gkRpm", modal).value || "0", 10),
+      };
+      if (editing) {
+        await api(`/admin/api/gateway-keys/${g.id}`, { method: "PATCH", body });
+        toast("Gateway key updated", "", "ok");
+      } else {
+        const r = await api("/admin/api/gateway-keys", { method: "POST", body });
+        toast("Gateway key generated", "", "ok");
+        copy(r.key, "Key copied to clipboard");
+      }
+    },
+  });
 }
 async function exportConfig() {
   const data = await api("/admin/api/export?reveal=1");
@@ -692,14 +716,19 @@ function renderProviders() {
 }
 
 function renderGwKeys() {
-  const rows = (STATE.gateway_keys || []).map((g) => `
-    <tr><td class="mono">${esc(g.masked)}</td><td>${esc(g.label)}</td>
+  const rows = (STATE.gateway_keys || []).map((g) => {
+    const models = (g.allowed_models || "").trim();
+    const scope = `${models ? "models: " + esc(models) : "all models"} · ${g.max_rpm ? esc(g.max_rpm) + " rpm" : "unlimited"}`;
+    return `<tr><td class="mono">${esc(g.masked)}</td><td>${esc(g.label)}</td>
+      <td class="muted">${scope}</td>
       <td class="r"><div class="row-actions">
         <button class="btn sm ghost" data-action="copy-key" data-value="${esc(g.key)}">Copy</button>
+        <button class="btn sm ghost" data-action="edit-gw" data-id="${g.id}">Edit</button>
         <button class="btn sm danger" data-action="del-gw" data-id="${g.id}">Revoke</button>
-      </div></td></tr>`).join("");
-  $("#gwKeys").innerHTML = `<table><thead><tr><th>Key</th><th>Label</th><th></th></tr></thead>
-    <tbody>${rows || emptyRow(3, "No gateway keys.")}</tbody></table>`;
+      </div></td></tr>`;
+  }).join("");
+  $("#gwKeys").innerHTML = `<table><thead><tr><th>Key</th><th>Label</th><th>Scope</th><th></th></tr></thead>
+    <tbody>${rows || emptyRow(4, "No gateway keys.")}</tbody></table>`;
 }
 
 function renderSettings() {

@@ -21,14 +21,14 @@ from .observability import (AUTH_FAILURES, ObservabilityMiddleware, log_event,
                             render_metrics)
 from .providers import PRESETS, preset_headers
 from .router import NoCapacity, Router, UnknownModel
-from .security import (SECURITY_HEADERS, LockoutGuard, SlidingRateLimiter,
-                       const_eq, validate_upstream_url)
+from .security import (SECURITY_HEADERS, KeyedRateLimiter, LockoutGuard,
+                       SlidingRateLimiter, const_eq, validate_upstream_url)
 
 BASE = Path(__file__).parent
 store = Store(settings.db_path)
 limiter = Limiter(settings)
 admin_guard = LockoutGuard(settings.admin_max_fails, settings.admin_lock_seconds)
-gw_limiter = SlidingRateLimiter(settings.gateway_rpm)
+gw_limiter = KeyedRateLimiter()
 
 @asynccontextmanager
 async def lifespan(app):
@@ -205,19 +205,33 @@ def gateway_auth(request: Request):
         AUTH_FAILURES.labels("gateway").inc()
         log_event("warn", "auth_failed", surface="gateway", reason="missing")
         raise HTTPException(401, "Missing API key")
+    if const_eq(token, settings.admin_token):
+        return token  # super-admin key is not quota-limited
     match = False
     for gk in store.gateway:
         if const_eq(token, gk):
             match = True
-    if const_eq(token, settings.admin_token):
-        match = True
     if not match:
         AUTH_FAILURES.labels("gateway").inc()
         log_event("warn", "auth_failed", surface="gateway", reason="invalid")
         raise HTTPException(401, "Invalid API key")
-    if not gw_limiter.allow(token):
+    meta = store.gateway_meta.get(token) or {}
+    limit = meta.get("max_rpm") or settings.gateway_rpm
+    if not gw_limiter.allow(token, limit):
+        log_event("warn", "gateway_rate_limited", key=meta.get("label") or "")
         raise HTTPException(429, "Gateway rate limit exceeded")
     return token
+
+
+def _model_allowed(gw, model) -> bool:
+    """Per-gateway-key model allow-list (empty list = all models)."""
+    meta = store.gateway_meta.get(gw) if gw else None
+    if not meta:
+        return True
+    allowed = (meta.get("allowed_models") or "").strip()
+    if not allowed:
+        return True
+    return model in {m.strip() for m in allowed.split(",") if m.strip()}
 
 
 def admin_auth(request: Request):
@@ -290,8 +304,12 @@ async def models(_=Depends(gateway_auth)):
         for v in store.vmodels.values() if v["enabled"]]}
 
 
-async def _run(request: Request, stream_forced=False):
+async def _run(request: Request, gw: str, stream_forced=False):
     body = await request.json()
+    if not _model_allowed(gw, body.get("model")):
+        log_event("warn", "model_forbidden", model=body.get("model"))
+        return openai_error("model is not permitted for this gateway key",
+                            code="model_forbidden", status=403, type_="permission_error")
     stream = bool(body.get("stream")) or stream_forced
     session = (request.headers.get("x-session-id")
                or request.headers.get("x-route-sticky")
@@ -313,24 +331,27 @@ async def _run(request: Request, stream_forced=False):
 
 
 @app.post("/v1/chat/completions")
-async def chat(request: Request, _=Depends(gateway_auth)):
-    return await _run(request)
+async def chat(request: Request, gw=Depends(gateway_auth)):
+    return await _run(request, gw)
 
 
 @app.post("/v1/completions")
-async def completions(request: Request, _=Depends(gateway_auth)):
+async def completions(request: Request, gw=Depends(gateway_auth)):
     body = await request.json()
     if body.get("prompt") is not None and not body.get("messages"):
         body["messages"] = [{"role": "user", "content": body["prompt"]}]
     # drop the legacy field so upstreams that reject unknown params don't 4xx
     body.pop("prompt", None)
-    return await _run(request)
+    return await _run(request, gw)
 
 
 @app.post("/v1/embeddings")
-async def embeddings(request: Request, _=Depends(gateway_auth)):
+async def embeddings(request: Request, gw=Depends(gateway_auth)):
     body = await request.json()
     name = body.get("model")
+    if not _model_allowed(gw, name):
+        return openai_error("model is not permitted for this gateway key",
+                            code="model_forbidden", status=403, type_="permission_error")
     try:
         vm, cands = router.resolve(name)
     except UnknownModel as e:
@@ -654,8 +675,13 @@ async def del_target(tid: int, _=Depends(admin_auth)):
 async def add_gateway_key(request: Request, _=Depends(admin_auth)):
     b = await request.json()
     key = b.get("key") or ("sk-router-" + secrets.token_urlsafe(24))
-    gid = store.insert("gateway_keys", {"label": b.get("label") or "client",
-                                        "key": key, "enabled": 1, "created_at": time.time()})
+    models = b.get("allowed_models") or ""
+    if isinstance(models, list):
+        models = ",".join(m.strip() for m in models if str(m).strip())
+    gid = store.insert("gateway_keys", {
+        "label": b.get("label") or "client", "key": key, "enabled": 1,
+        "allowed_models": models.strip(), "max_rpm": int(b.get("max_rpm") or 0),
+        "created_at": time.time()})
     return {"id": gid, "key": key}
 
 
@@ -664,6 +690,13 @@ async def edit_gateway_key(gid: int, request: Request, _=Depends(admin_auth)):
     b = await request.json()
     if "enabled" in b:
         b["enabled"] = 1 if b["enabled"] else 0
+    if "allowed_models" in b:
+        models = b["allowed_models"] or ""
+        if isinstance(models, list):
+            models = ",".join(m.strip() for m in models if str(m).strip())
+        b["allowed_models"] = models.strip()
+    if "max_rpm" in b:
+        b["max_rpm"] = int(b["max_rpm"] or 0)
     store.update("gateway_keys", gid, b)
     return {"ok": True}
 
