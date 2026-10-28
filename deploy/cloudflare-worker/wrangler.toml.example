@@ -1,0 +1,12 @@
+# Example: Cloudflare Worker in front of the gateway.
+#   npx wrangler deploy
+name = "llm-router-edge"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+# Your deployment (Render, or any host).
+ORIGIN = "https://llm-router-tjdk.onrender.com"
+
+# Optional: a custom hostname route, e.g.
+# routes = [{ pattern = "router.example.com/*", zone_name = "example.com" }]
