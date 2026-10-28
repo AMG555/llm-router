@@ -124,6 +124,8 @@ All configuration is environment variables (see `.env.example`).
 | `DEFAULT_COOLDOWN` / `SHORT_COOLDOWN` | `20` / `5` | Cooldown seconds. |
 | `REQUEST_TIMEOUT` / `CONNECT_TIMEOUT` | `600` / `15` | Upstream timeouts. |
 | `LOG_REQUESTS` / `MAX_LOG_ROWS` | `true` / `5000` | Traffic log and retention. |
+| `LOG_FORMAT` | `text` | `text` or `json` (structured logs with request ids). |
+| `METRICS_ENABLED` / `METRICS_PUBLIC` | `true` / `false` | Prometheus `/metrics`; public disables the admin-token check. |
 | `BOOTSTRAP_CONFIG` | — | base64 JSON imported on first boot (ephemeral hosts). |
 
 ---
@@ -134,11 +136,14 @@ All configuration is environment variables (see `.env.example`).
 | --- | --- | --- | --- |
 | GET | `/health`, `/healthz` | none | Liveness. |
 | GET | `/readyz` | none | Readiness (DB reachable). |
+| GET | `/metrics` | admin | Prometheus metrics (RED + router + auth). |
 | GET | `/v1/models` | gateway | List virtual models. |
 | POST | `/v1/chat/completions` | gateway | Chat (streaming supported). |
 | POST | `/v1/completions` | gateway | Legacy completions. |
 | POST | `/v1/embeddings` | gateway | Embeddings passthrough. |
 | GET | `/admin/api/egress` | admin | Report the outbound IP / proxy configuration. |
+| GET | `/admin/api/audit` | admin | Recent admin actions (audit log). |
+| POST/DELETE | `/admin/api/admin-tokens` | admin | Create/revoke named admin users. |
 | GET | `/admin/api/*` | admin | Console backend. |
 
 Responses carry `x-router-provider`, `x-router-key`, `x-router-model` and
@@ -198,6 +203,43 @@ Full methodology, including a reverted experiment, is in [`PERF.md`](PERF.md).
 
 For the lowest latency, run on Linux (uvloop/httptools), keep one worker, and
 avoid an egress proxy unless you need IP pinning.
+
+## Access control & observability
+
+**Roles.** The shared `ADMIN_TOKEN` is the super-admin. Create named admin
+users (Settings → *Team & audit*) with a role: **viewer** (read-only) or
+**admin** (full). Tokens are stored only as SHA-256 hashes. Every mutating
+admin action is written to an audit log.
+
+**Gateway-key scopes.** Each client key can be restricted to a list of virtual
+models and given its own requests-per-minute quota (Settings → *Gateway keys*).
+A forbidden model returns `403 model_forbidden`; an over-quota key returns
+`429`.
+
+**Metrics.** `GET /metrics` exposes Prometheus series: `http_requests_total`,
+`http_request_duration_seconds` (histogram), `router_attempts_total`,
+`router_failovers_total`, `router_cooldowns_total`, `auth_failures_total`.
+Admin-auth by default; set `METRICS_PUBLIC=true` to scrape without a token.
+
+**Logs.** `LOG_FORMAT=json` emits one structured object per line, each carrying
+the request id. `x-request-id` is accepted from the caller (or generated),
+returned on the response, and forwarded to upstreams so a request can be
+traced end-to-end.
+
+**Secret rotation.** Rotate `SECRET_KEY` without losing data:
+
+```bash
+python -m app.rotate --db ./data/router.db --old "$OLD" --new "$NEW"
+```
+
+`--old ""` migrates plaintext to encrypted; `--new ""` decrypts. Run offline.
+
+## Scaling
+
+The supported topology is **one instance**. Rate/cooldown state is in-process
+and storage is a single SQLite file, so multiple replicas would not share
+limits. The decision, the reasons, and the Redis migration path are recorded in
+[`docs/adr/0001-state-and-scaling.md`](docs/adr/0001-state-and-scaling.md).
 
 ## Testing
 

@@ -22,3 +22,18 @@ jobs:
         run: pip-audit -r requirements.txt
       - name: Run tests
         run: python -m pytest -q
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t llm-router:ci .
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: llm-router:ci
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: "true"
+          exit-code: "1"
