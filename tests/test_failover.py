@@ -1,4 +1,5 @@
 """Failover, cooldown isolation and error-path behaviour (mock upstream)."""
+import asyncio
 import time
 
 
@@ -14,17 +15,18 @@ def test_429_fails_over_and_only_cools_bad_key(client, gw_h, make_model, app_mod
     assert "OK-good" in _content(r)
     assert r.headers["x-router-attempts"] == "2"
     assert r.headers["x-router-key"] == "good"
-    bad = app_module.limiter.kstate(f"k{m['keys'][0]}").snapshot(time.time())
-    good = app_module.limiter.kstate(f"k{m['keys'][1]}").snapshot(time.time())
-    assert bad["cooldown"] > 0
-    assert good["cooldown"] == 0
+    be = app_module.limiter.backend
+    bad_cd = asyncio.run(be.cooldown_until("k", f"k{m['keys'][0]}"))
+    good_cd = asyncio.run(be.cooldown_until("k", f"k{m['keys'][1]}"))
+    assert bad_cd > time.time()
+    assert good_cd == 0
 
 
 def test_target_state_not_cooled_by_key_rate_limit(client, gw_h, make_model, app_module):
     make_model([("bad2", "429", 1), ("good2", "ok", 100)])
     t = app_module.store.rows("targets")[-1]
-    st = app_module.limiter.tstate(f"t{t['id']}").snapshot(time.time())
-    assert st["cooldown"] == 0
+    cd = asyncio.run(app_module.limiter.backend.cooldown_until("t", f"t{t['id']}"))
+    assert cd == 0
 
 
 def test_second_request_uses_healthy_key(client, gw_h, make_model):

@@ -120,6 +120,7 @@ All configuration is environment variables (see `.env.example`).
 | `BLOCK_PRIVATE_UPSTREAMS` | `false` | Reject upstreams in private/loopback ranges. |
 | `EGRESS_PROXY` | — | Force upstream calls through a fixed-IP proxy (for IP allowlisting). |
 | `EGRESS_CHECK_URL` | — | IP-echo URL used by `/admin/api/egress?check=1`. |
+| `REDIS_URL` | — | Share rate windows + cooldowns across instances (see Scaling). |
 | `MAX_ATTEMPTS` | `8` | Max upstream attempts per request. |
 | `DEFAULT_COOLDOWN` / `SHORT_COOLDOWN` | `20` / `5` | Cooldown seconds. |
 | `REQUEST_TIMEOUT` / `CONNECT_TIMEOUT` | `600` / `15` | Upstream timeouts. |
@@ -236,10 +237,20 @@ python -m app.rotate --db ./data/router.db --old "$OLD" --new "$NEW"
 
 ## Scaling
 
-The supported topology is **one instance**. Rate/cooldown state is in-process
-and storage is a single SQLite file, so multiple replicas would not share
-limits. The decision, the reasons, and the Redis migration path are recorded in
-[`docs/adr/0001-state-and-scaling.md`](docs/adr/0001-state-and-scaling.md).
+Default topology is **one instance**: rate windows and cooldowns are in-process
+and configuration is a single SQLite file.
+
+For multiple instances, set `REDIS_URL`. The limiter then uses a Redis backend
+for RPM/TPM windows and cooldowns (no code change). Caveats keep single-instance
+the recommended default:
+
+- **Configuration is not shared.** Each instance reads its own SQLite file
+  (`DB_PATH`), so replicas diverge. Full multi-instance needs a shared config
+  store.
+- **Concurrency caps are per instance** (in-flight counts are in-process).
+- The Redis backend adds a round trip per limit check on the hot path.
+
+Design notes: [`docs/adr/0001-state-and-scaling.md`](docs/adr/0001-state-and-scaling.md).
 
 ## Testing
 

@@ -376,7 +376,7 @@ async def embeddings(request: Request, gw=Depends(gateway_auth)):
     except UnknownModel as e:
         return openai_error(str(e), code="model_not_found", status=404)
     for cand in router.order(cands, "balanced", 0, None):
-        if not limiter.acquire(cand):
+        if not await limiter.acquire(cand):
             continue
         from .adapters import get_adapter
         adapter = get_adapter(cand["adapter"])
@@ -387,11 +387,11 @@ async def embeddings(request: Request, gw=Depends(gateway_auth)):
             url, headers, payload, _ = adapter.build_embeddings(cand, body)
             r = await router.client_for(cand.get("proxy")).post(url, json=payload, headers=headers)
         except Exception:
-            limiter.cool(cand, 5, "network", key_only=True)
+            await limiter.cool(cand, 5, "network", key_only=True)
             continue
         limiter.release(cand, 0, r.status_code)
         if r.status_code == 429:
-            limiter.cool(cand, util.parse_retry_after(r.headers, 20), "429", key_only=True)
+            await limiter.cool(cand, util.parse_retry_after(r.headers, 20), "429", key_only=True)
             continue
         if r.status_code >= 400:
             continue
@@ -404,7 +404,7 @@ async def embeddings(request: Request, gw=Depends(gateway_auth)):
 # ---------------- admin API ----------------
 @app.get("/admin/api/state")
 async def admin_state(who=Depends(admin_auth)):
-    health = limiter.health()
+    health = await limiter.health()
     logs = store.rows("logs", "1=1 ORDER BY id DESC LIMIT 50")
     return {
         "role": who["role"],
@@ -448,7 +448,7 @@ def _stats():
 
 @app.get("/admin/api/health")
 async def admin_health(_=Depends(admin_auth)):
-    return limiter.health()
+    return await limiter.health()
 
 
 @app.get("/admin/api/egress")
@@ -473,8 +473,10 @@ async def admin_egress(check: int = 0, _=Depends(admin_auth)):
     for p in store.providers.values():
         if p.get("proxy"):
             egress_ids.add(p["proxy"])
-    info["usage_1m"] = {(util.mask_proxy(e) if e != "default" else "default"):
-                        router.egress.usage(e) for e in egress_ids}
+    usage = {}
+    for e in egress_ids:
+        usage[util.mask_proxy(e) if e != "default" else "default"] = await limiter.egress_usage(e)
+    info["usage_1m"] = usage
     if check:
         if not settings.egress_check_url:
             info["check_error"] = "EGRESS_CHECK_URL is not configured"
@@ -601,12 +603,7 @@ async def del_key(kid: int, _=Depends(admin_auth)):
 
 @app.post("/admin/api/keys/{kid}/reset")
 async def reset_key(kid: int, _=Depends(admin_auth)):
-    st = limiter.kstate(f"k{kid}")
-    st.cooldown = 0.0
-    st.rpm.clear()
-    st.tpm.clear()
-    st.fails = 0
-    st.last_error = ""
+    await limiter.reset(f"k{kid}")
     return {"ok": True}
 
 

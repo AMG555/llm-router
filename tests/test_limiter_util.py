@@ -1,10 +1,15 @@
 """Utility and rate-governor unit tests."""
+import asyncio
 import time
 
 from app import util
 from app.crypto import SecretBox
 from app.limiter import Limiter
 from app.config import Settings
+
+
+def run(coro):
+    return asyncio.run(coro)
 
 
 def test_mask():
@@ -51,43 +56,42 @@ def _cand(cid, **kw):
 def test_limiter_rpm():
     lim = Limiter(Settings())
     c = _cand("a", key_rpm=2)
-    assert lim.acquire(c) and lim.acquire(c)
-    assert not lim.acquire(c)
+    assert run(lim.acquire(c)) and run(lim.acquire(c))
+    assert not run(lim.acquire(c))
 
 
 def test_limiter_concurrency():
     lim = Limiter(Settings())
     c = _cand("b", key_conc=1)
-    assert lim.acquire(c)
-    assert not lim.acquire(c)
+    assert run(lim.acquire(c))
+    assert not run(lim.acquire(c))
     lim.release(c, 5, 200)
-    assert lim.acquire(c)
+    assert run(lim.acquire(c))
 
 
 def test_limiter_tpm():
     lim = Limiter(Settings())
     c = _cand("c", key_tpm=10)
-    assert lim.acquire(c)
+    assert run(lim.acquire(c))
     lim.release(c, 5, 200)
-    lim.add_tokens(c, 10)
-    assert not lim.acquire(c)
+    run(lim.add_tokens(c, 10))
+    assert not run(lim.acquire(c))
 
 
 def test_limiter_cooldown():
     lim = Limiter(Settings())
     c = _cand("d")
-    lim.cool(c, 60, "429", key_only=True)
-    assert not lim.available(c)
-    assert lim.kstate("d").cooldown > time.time()
-    lim.kstate("d").cooldown = 0
-    assert lim.available(c)
+    run(lim.cool(c, 60, "429", key_only=True))
+    assert not run(lim.available(c))
+    run(lim.reset("d"))
+    assert run(lim.available(c))
 
 
 def test_limiter_health_shape():
     lim = Limiter(Settings())
-    lim.acquire(_cand("e"))
-    h = lim.health()
-    assert "keys" in h and "targets" in h
+    run(lim.acquire(_cand("e")))
+    h = run(lim.health())
+    assert "keys" in h and "targets" in h and h["backend"] == "memory"
 
 
 def test_secretbox_round_trip():

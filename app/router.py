@@ -11,7 +11,6 @@ from . import util
 from .adapters import get_adapter
 from .observability import (ROUTER_ATTEMPTS, ROUTER_COOLDOWNS, ROUTER_FAILOVERS,
                             log_event, request_id_var)
-from .security import SlidingRateLimiter
 
 
 class NoCapacity(Exception):
@@ -41,9 +40,6 @@ class Router:
         self.bus = bus
         self.swrr = {}
         self._clients = {}
-        # Per-egress-identity rate budget (keeps a single outbound IP under the
-        # provider's per-IP limit instead of rotating to evade it).
-        self.egress = SlidingRateLimiter(self.s.egress_ip_rpm)
         # default client (env proxies honoured unless a global egress proxy is set)
         self.client = self.client_for(None)
 
@@ -213,19 +209,19 @@ class Router:
 
         strategy = vm.get("strategy") or "balanced"
         ordered = self.order(cands, strategy, vm.get("sticky", 1), session)
-        ready = [c for c in ordered if self.limiter.available(c)]
+        ready = [c for c in ordered if await self.limiter.available(c)]
         pool = ready or ordered
         attempts = 0
         errors = []
 
         for cand in pool[: self.s.max_attempts]:
             egress = self.egress_key(cand)
-            if not self.egress.allow(egress):
+            if not await self.limiter.egress_allow(egress):
                 errors.append(f"{cand['provider_name']} egress rate budget reached")
                 self.bus.publish({"kind": "throttle", "provider": cand["provider_name"],
                                   "key": cand["key_label"], "reason": "egress rpm budget"})
                 continue
-            if not self.limiter.acquire(cand):
+            if not await self.limiter.acquire(cand):
                 continue
             attempts += 1
             adapter = get_adapter(cand["adapter"])
@@ -241,8 +237,8 @@ class Router:
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
                     httpx.RemoteProtocolError, httpx.PoolTimeout) as e:
                 self.limiter.release(cand, int((time.time() - t0) * 1000), 599)
-                self.limiter.cool(cand, self.s.short_cooldown,
-                                  f"network: {type(e).__name__}", key_only=True)
+                await self.limiter.cool(cand, self.s.short_cooldown,
+                                        f"network: {type(e).__name__}", key_only=True)
                 errors.append(f"{cand['provider_name']}/{cand['key_label']} net {type(e).__name__}")
                 ROUTER_ATTEMPTS.labels(cand["provider_name"], "net").inc()
                 ROUTER_FAILOVERS.labels(cand["provider_name"]).inc()
@@ -264,8 +260,8 @@ class Router:
                 body_txt = await resp.aread()
                 await resp.aclose()
                 self.limiter.release(cand, int((time.time() - t0) * 1000), 429)
-                self.limiter.cool(cand, wait, "429 rate limited", key_only=True)
-                self.limiter.add_tokens(cand, util.estimate_payload_tokens(body))
+                await self.limiter.cool(cand, wait, "429 rate limited", key_only=True)
+                await self.limiter.add_tokens(cand, util.estimate_payload_tokens(body))
                 errors.append(f"{cand['provider_name']} 429 (cool {wait:.0f}s)")
                 self.bus.publish({"kind": "cooldown", "provider": cand["provider_name"],
                                   "key": cand["key_label"], "seconds": round(wait, 1)})
@@ -280,7 +276,7 @@ class Router:
                 await resp.aread()
                 await resp.aclose()
                 self.limiter.release(cand, int((time.time() - t0) * 1000), status)
-                self.limiter.cool(cand, 120, f"auth {status}", key_only=True)
+                await self.limiter.cool(cand, 120, f"auth {status}", key_only=True)
                 errors.append(f"{cand['provider_name']} auth {status}")
                 ROUTER_FAILOVERS.labels(cand["provider_name"]).inc()
                 log_event("warn", "upstream_auth_error", provider=cand["provider_name"],
@@ -292,7 +288,7 @@ class Router:
                 txt = await resp.aread()
                 await resp.aclose()
                 self.limiter.release(cand, int((time.time() - t0) * 1000), status)
-                self.limiter.cool(cand, self.s.short_cooldown, f"upstream {status}", key_only=True)
+                await self.limiter.cool(cand, self.s.short_cooldown, f"upstream {status}", key_only=True)
                 errors.append(f"{cand['provider_name']} {status}")
                 ROUTER_FAILOVERS.labels(cand["provider_name"]).inc()
                 log_event("warn", "upstream_error", provider=cand["provider_name"],
@@ -306,7 +302,7 @@ class Router:
                 txt = await resp.aread()
                 await resp.aclose()
                 self.limiter.release(cand, int((time.time() - t0) * 1000), 404)
-                self.limiter.cool(cand, 60, "404 model", key_only=True)
+                await self.limiter.cool(cand, 60, "404 model", key_only=True)
                 errors.append(f"{cand['provider_name']} 404")
                 ROUTER_FAILOVERS.labels(cand["provider_name"]).inc()
                 log_event("warn", "upstream_model_not_found", provider=cand["provider_name"],
@@ -351,8 +347,8 @@ class Router:
             data = json.loads(raw) if raw else {}
             pt, ct = adapter.usage(data)
             self.limiter.release(cand, int((time.time() - t0) * 1000), 200)
-            self.limiter.add_tokens(cand, pt or prompt_tokens)
-            self.limiter.add_tokens(cand, ct)
+            await self.limiter.add_tokens(cand, pt or prompt_tokens)
+            await self.limiter.add_tokens(cand, ct)
             self._log(vm, cand, 200, started, attempts, errors, session, pt, ct)
             self.bus.publish({"kind": "ok", "provider": cand["provider_name"],
                               "key": cand["key_label"], "ms": int((time.time() - started) * 1000),
@@ -377,7 +373,7 @@ class Router:
             text_len = stats.get("text_len", 0)
             ct = stats.get("completion_tokens") or (max(1, text_len // 4) if text_len else 0)
             self.limiter.release(cand, int((time.time() - started) * 1000), 200)
-            self.limiter.add_tokens(cand, pt + ct)
+            await self.limiter.add_tokens(cand, pt + ct)
             self._log(vm, cand, 200, started, attempts, errors, session, pt, ct)
             self.bus.publish({"kind": "ok", "provider": cand["provider_name"],
                               "key": cand["key_label"], "ms": int((time.time() - started) * 1000),

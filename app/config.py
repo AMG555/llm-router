@@ -56,6 +56,9 @@ class Settings:
         # the default egress). Set this BELOW the provider's per-IP limit so
         # the gateway throttles instead of tripping the limit. 0 = unlimited.
         self.egress_ip_rpm = int(os.getenv("EGRESS_IP_RPM", "0"))
+        # Optional Redis URL: shares rate windows and cooldowns across
+        # instances. Empty = in-process state (single instance).
+        self.redis_url = os.getenv("REDIS_URL", "").strip()
         # Optional URL returning the caller's public IP (e.g. an IP echo
         # service); used by GET /admin/api/egress?check=1.
         self.egress_check_url = os.getenv("EGRESS_CHECK_URL", "").strip()

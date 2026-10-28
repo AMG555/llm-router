@@ -1,7 +1,25 @@
 # ADR 0001 — State model and scaling
 
-- **Status:** accepted
+- **Status:** accepted; partially superseded — see Update
 - **Date:** 2026-10-28
+
+## Update (2026-10-28)
+
+Step 1–2 of the migration path below shipped: `app/statebackend.py` adds a
+`RedisBackend` (selected with `REDIS_URL`) that shares **RPM/TPM windows and
+cooldowns** across instances, with `MemoryBackend` as the default. The limiter
+is now `async` and runs against either backend; in-flight concurrency, latency
+EMA and configuration remain in-process/on-disk.
+
+Remaining before multi-instance can be called supported:
+
+- **Shared configuration store** — each instance still reads its own SQLite
+  file, so replicas would diverge on providers/keys/models.
+- **Shared concurrency** — in-flight caps are per instance.
+- Integration coverage of the two-instance cooldown case (unit-level today via
+  `fakeredis`).
+
+Until those land, the recommended topology remains one instance.
 
 ## Context
 

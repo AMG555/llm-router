@@ -6,3 +6,4 @@ pydantic==2.14.1
 python-multipart==0.0.32
 cryptography==50.0.2
 prometheus-client==0.26.0
+redis==8.1.0
