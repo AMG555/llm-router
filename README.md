@@ -263,6 +263,10 @@ Set `ADMIN_TOKEN`, `SECRET_KEY` and (if relevant) `ENV=production` as platform
 secrets. Expose the assigned port via the platform's routing — do not hard-code
 a hostname anywhere in config.
 
+A `render.yaml` blueprint is included so a source-connected platform can
+provision the service (build/start/health + generated secrets) without manual
+setup.
+
 ### Keeping an idle-sleeping instance warm
 
 Many free tiers stop (sleep) an instance after a period of inactivity, which
