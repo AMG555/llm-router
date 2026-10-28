@@ -285,14 +285,14 @@ async def value_exc(request: Request, exc: ValueError):
 
 
 # ---------------- health ----------------
-@app.get("/health")
-@app.get("/healthz")
+@app.api_route("/health", methods=["GET", "HEAD"])
+@app.api_route("/healthz", methods=["GET", "HEAD"])
 async def health():
     return {"status": "ok", "models": len(store.vmodels), "providers": len(store.providers),
             "keys": len(store.keys), "time": time.time()}
 
 
-@app.get("/readyz")
+@app.api_route("/readyz", methods=["GET", "HEAD"])
 async def readyz():
     try:
         store.conn.execute("SELECT 1")
@@ -301,7 +301,7 @@ async def readyz():
         return JSONResponse({"status": "not-ready"}, status_code=503)
 
 
-@app.get("/metrics")
+@app.api_route("/metrics", methods=["GET", "HEAD"])
 async def metrics(request: Request):
     if not settings.metrics_enabled:
         raise HTTPException(404, "not found")
@@ -904,6 +904,6 @@ async def do_import(request: Request, wipe: int = 0, _=Depends(admin_auth)):
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def index():
     return FileResponse(str(BASE / "static" / "index.html"))

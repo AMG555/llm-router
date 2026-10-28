@@ -8,6 +8,12 @@ def test_health_endpoints(client):
     assert client.get("/readyz").json()["status"] == "ready"
 
 
+def test_head_requests_supported(client):
+    # Load balancers and uptime monitors commonly probe with HEAD.
+    for path in ("/health", "/healthz", "/readyz", "/"):
+        assert client.head(path).status_code == 200, path
+
+
 def test_openapi_disabled_by_default(client):
     assert client.get("/openapi.json").status_code == 404
     assert client.get("/docs").status_code == 404
