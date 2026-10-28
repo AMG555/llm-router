@@ -18,7 +18,8 @@ let STATE = {
   stats: {}, meta: {}, presets: {}, loaded: false,
 };
 const UI = {
-  route: "overview", feed: [], paused: false, online: true,
+  route: "overview", feed: [], paused: false, online: true, seeded: false,
+  expanded: new Set(),
   q: { key: "", model: "", provider: "", level: "", log: "" },
 };
 
@@ -365,6 +366,7 @@ function newKeyModal(pid) {
 }
 
 function bulkKeysModal() {
+  if (!(STATE.providers || []).length) return toast("Add a provider first", "Keys must belong to a provider.", "warn");
   const provs = (STATE.providers || []).map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("");
   formDialog({
     title: "Bulk add keys",
@@ -415,6 +417,7 @@ function newModelModal() {
 }
 
 function newTargetModal(vid) {
+  if (!(STATE.providers || []).length) return toast("Add a provider first", "A target points at a provider.", "warn");
   const provs = (STATE.providers || []).map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("");
   formDialog({
     title: "Add target", sub: "Point the model at an upstream model on a provider.", submitLabel: "Add",
@@ -502,9 +505,12 @@ async function probeEgress() {
 function toggleEntity(el) {
   const ent = el.closest(".entity");
   const body = $(".entity-body", ent);
-  const open = ent.classList.toggle("open");
+  const open = !ent.classList.contains("open");
+  ent.classList.toggle("open", open);
   body.hidden = !open;
   el.setAttribute("aria-expanded", open ? "true" : "false");
+  const key = ent.dataset.key;
+  if (key) { if (open) UI.expanded.add(key); else UI.expanded.delete(key); }
 }
 function togglePause(el) {
   UI.paused = !UI.paused;
@@ -625,8 +631,9 @@ function renderModels() {
         <button class="btn sm ghost" data-action="toggle-target" data-id="${t.id}" data-next="${t.enabled ? 0 : 1}">${t.enabled ? "Disable" : "Enable"}</button>
         <button class="btn sm danger" data-action="del-target" data-id="${t.id}">Remove</button>
       </div>`).join("") : `<div class="mini muted">No targets yet — this model returns 429 until one is added.</div>`;
-    return `<div class="entity">
-      <div class="entity-head" data-action="toggle-entity" role="button" tabindex="0" aria-expanded="false">
+    const ekey = "model:" + v.id, eopen = UI.expanded.has(ekey);
+    return `<div class="entity${eopen ? " open" : ""}" data-key="${ekey}">
+      <div class="entity-head" data-action="toggle-entity" role="button" tabindex="0" aria-expanded="${eopen}">
         <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
         <h3 class="mono">${esc(v.name)}</h3>
         <span class="tag">${esc(v.strategy)}</span>${v.sticky ? '<span class="tag">sticky</span>' : ""}
@@ -637,7 +644,7 @@ function renderModels() {
         <button class="btn sm danger" data-action="del-model" data-id="${v.id}">Delete</button>
       </div>
       ${v.description ? `<div class="entity-meta">${esc(v.description)}</div>` : ""}
-      <div class="entity-body" hidden>${body}</div>
+      <div class="entity-body"${eopen ? "" : " hidden"}>${body}</div>
     </div>`;
   }).join("");
 }
@@ -666,8 +673,9 @@ function renderProviders() {
         <button class="btn sm danger" data-action="del-key" data-id="${k.id}">Remove</button>
       </div>`;
     }).join("") : `<div class="mini muted">No keys yet — this provider is skipped.</div>`;
-    return `<div class="entity">
-      <div class="entity-head" data-action="toggle-entity" role="button" tabindex="0" aria-expanded="false">
+    const ekey = "provider:" + p.id, eopen = UI.expanded.has(ekey);
+    return `<div class="entity${eopen ? " open" : ""}" data-key="${ekey}">
+      <div class="entity-head" data-action="toggle-entity" role="button" tabindex="0" aria-expanded="${eopen}">
         <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
         <h3>${esc(p.name)}</h3>
         <span class="tag">${esc(p.adapter)}</span>${p.proxy_set ? '<span class="tag">egress proxy</span>' : ""}
@@ -678,7 +686,7 @@ function renderProviders() {
         <button class="btn sm danger" data-action="del-provider" data-id="${p.id}">Delete</button>
       </div>
       <div class="entity-meta">${esc(p.base_url)}</div>
-      <div class="entity-body" hidden>${body}</div>
+      <div class="entity-body"${eopen ? "" : " hidden"}>${body}</div>
     </div>`;
   }).join("");
 }
@@ -724,7 +732,7 @@ function seedFeed() {
     ts: l.ts, level: (l.status || 500) < 400 ? "ok" : "retry",
     model: l.vmodel, target: `${l.provider || ""}/${l.key_label || ""}`.replace(/^\/|\/$/g, ""),
     status: l.status, ms: l.latency_ms, attempts: l.attempts, note: l.error || "",
-  })).reverse();
+  }));
 }
 function pushEvent(item) {
   const e = {
@@ -737,8 +745,13 @@ function pushEvent(item) {
   };
   UI.feed.unshift(e);
   if (UI.feed.length > MAX_FEED) UI.feed.length = MAX_FEED;
-  if (UI.route === "traffic" && !UI.paused) renderFeed();
+  if (UI.route === "traffic" && !UI.paused) scheduleFeedRender();
   if (UI.route === "overview") { renderRecent(); }
+}
+let feedTimer = null;
+function scheduleFeedRender() {
+  if (feedTimer) return;
+  feedTimer = setTimeout(() => { feedTimer = null; if (UI.route === "traffic" && !UI.paused) renderFeed(); }, 200);
 }
 function renderFeed() {
   const lvl = UI.q.level, q = UI.q.log.toLowerCase();
@@ -791,7 +804,7 @@ async function refresh() {
     renderProviders(); renderGwKeys(); renderSettings(); renderFoot();
     if (UI.route === "traffic") renderFeed();
   } catch (err) {
-    if (err instanceof AuthError) { setConn("locked"); openTokenModal(); }
+    if (err instanceof AuthError) { setConn("locked"); if ($("#modalRoot").hidden) openTokenModal(); }
     else { showOffline(); console.error("refresh failed:", err); }
   } finally { refreshing = false; }
 }

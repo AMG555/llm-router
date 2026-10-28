@@ -265,6 +265,8 @@ async def completions(request: Request, _=Depends(gateway_auth)):
     body = await request.json()
     if body.get("prompt") is not None and not body.get("messages"):
         body["messages"] = [{"role": "user", "content": body["prompt"]}]
+    # drop the legacy field so upstreams that reject unknown params don't 4xx
+    body.pop("prompt", None)
     return await _run(request)
 
 
@@ -458,6 +460,8 @@ async def add_key(request: Request, _=Depends(admin_auth)):
     b = await request.json()
     if not b.get("provider_id") or not b.get("api_key"):
         raise HTTPException(400, "provider_id and api_key required")
+    if int(b["provider_id"]) not in store.providers:
+        raise HTTPException(400, "unknown provider")
     kid = store.insert("api_keys", {
         "provider_id": int(b["provider_id"]),
         "label": b.get("label") or "",
@@ -543,10 +547,20 @@ async def add_target(request: Request, _=Depends(admin_auth)):
     b = await request.json()
     if not b.get("vmodel_id") or not b.get("provider_id") or not b.get("upstream_model"):
         raise HTTPException(400, "vmodel_id, provider_id, upstream_model required")
+    vid, pid = int(b["vmodel_id"]), int(b["provider_id"])
+    if vid not in store.vmodels_by_id:
+        raise HTTPException(400, "unknown model")
+    if pid not in store.providers:
+        raise HTTPException(400, "unknown provider")
+    kid = int(b["key_id"]) if b.get("key_id") else None
+    if kid is not None:
+        k = store.keys.get(kid)
+        if not k or k["provider_id"] != pid:
+            raise HTTPException(400, "key does not belong to that provider")
     tid = store.insert("targets", {
-        "vmodel_id": int(b["vmodel_id"]),
-        "provider_id": int(b["provider_id"]),
-        "key_id": int(b["key_id"]) if b.get("key_id") else None,
+        "vmodel_id": vid,
+        "provider_id": pid,
+        "key_id": kid,
         "upstream_model": b["upstream_model"].strip(),
         "weight": float(b.get("weight") or 1),
         "priority": int(b.get("priority") or 100),

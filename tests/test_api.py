@@ -74,3 +74,26 @@ def test_body_size_limit(client, gw_h):
 
 def test_logs_clear(client, admin_h):
     assert client.delete("/admin/api/logs", headers=admin_h).status_code == 200
+
+
+def test_key_requires_existing_provider(client, admin_h):
+    r = client.post("/admin/api/keys", headers=admin_h,
+                    json={"provider_id": 999999, "api_key": "sk-x"})
+    assert r.status_code == 400
+
+
+def test_target_requires_existing_model_and_provider(client, admin_h, make_model):
+    m = make_model([("ref-check", "ok", 100)])
+    assert client.post("/admin/api/targets", headers=admin_h, json={
+        "vmodel_id": 999999, "provider_id": m["pid"], "upstream_model": "x"}).status_code == 400
+    assert client.post("/admin/api/targets", headers=admin_h, json={
+        "vmodel_id": m["vid"], "provider_id": 999999, "upstream_model": "x"}).status_code == 400
+
+
+def test_target_key_must_belong_to_provider(client, admin_h, make_model):
+    a = make_model([("owner-a", "ok", 100)])
+    b = make_model([("owner-b", "ok", 100)])
+    r = client.post("/admin/api/targets", headers=admin_h, json={
+        "vmodel_id": b["vid"], "provider_id": b["pid"], "key_id": a["keys"][0],
+        "upstream_model": "x"})
+    assert r.status_code == 400
