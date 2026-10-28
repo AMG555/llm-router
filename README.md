@@ -264,6 +264,11 @@ Set `ADMIN_TOKEN`, `SECRET_KEY` and (if relevant) `ENV=production` as platform
 secrets. Expose the assigned port via the platform's routing — do not hard-code
 a hostname anywhere in config.
 
+The repo includes a `.python-version` file pinning **Python 3.12**. Run on
+Python **3.10–3.13**; Python 3.14 is not yet supported by the pinned
+dependency set (no prebuilt `pydantic-core` wheel), so builds on 3.14 fall back
+to a source build and fail.
+
 A `render.yaml` blueprint is included so a source-connected platform can
 provision the service (build/start/health + generated secrets) without manual
 setup.
