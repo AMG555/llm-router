@@ -65,6 +65,11 @@ class Settings:
         self.log_requests = _bool(os.getenv("LOG_REQUESTS"), True)
         self.max_log_rows = int(os.getenv("MAX_LOG_ROWS", "5000"))
 
+        # --- observability ---
+        self.log_format = (os.getenv("LOG_FORMAT", "text") or "text").lower()  # text|json
+        self.metrics_enabled = _bool(os.getenv("METRICS_ENABLED"), True)
+        self.metrics_public = _bool(os.getenv("METRICS_PUBLIC"), False)
+
     @property
     def is_production(self) -> bool:
         return self.env not in ("dev", "development", "local", "test")

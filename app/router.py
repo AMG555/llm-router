@@ -9,6 +9,8 @@ import httpx
 
 from . import util
 from .adapters import get_adapter
+from .observability import (ROUTER_ATTEMPTS, ROUTER_COOLDOWNS, ROUTER_FAILOVERS,
+                            log_event, request_id_var)
 from .security import SlidingRateLimiter
 
 
@@ -231,6 +233,9 @@ class Router:
             try:
                 client = self.client_for(cand.get("proxy"))
                 url, headers, payload, _ = adapter.build(cand, body, stream)
+                rid = request_id_var.get()
+                if rid:
+                    headers.setdefault("x-request-id", rid)
                 req = client.build_request("POST", url, json=payload, headers=headers)
                 resp = await client.send(req, stream=True)
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
@@ -239,11 +244,19 @@ class Router:
                 self.limiter.cool(cand, self.s.short_cooldown,
                                   f"network: {type(e).__name__}", key_only=True)
                 errors.append(f"{cand['provider_name']}/{cand['key_label']} net {type(e).__name__}")
+                ROUTER_ATTEMPTS.labels(cand["provider_name"], "net").inc()
+                ROUTER_FAILOVERS.labels(cand["provider_name"]).inc()
+                log_event("warn", "upstream_network_error", provider=cand["provider_name"],
+                          key=cand["key_label"], error=type(e).__name__)
                 self.bus.publish({"kind": "retry", "provider": cand["provider_name"],
                                   "key": cand["key_label"], "reason": "network"})
                 continue
 
             status = resp.status_code
+            outcome = ("ok" if status < 400 else "rate_limited" if status == 429
+                       else "auth" if status in (401, 403) else "not_found" if status == 404
+                       else "error_5xx" if status >= 500 or status == 408 else "client_error")
+            ROUTER_ATTEMPTS.labels(cand["provider_name"], outcome).inc()
 
             # ---- rate limited ----
             if status == 429:
@@ -256,6 +269,10 @@ class Router:
                 errors.append(f"{cand['provider_name']} 429 (cool {wait:.0f}s)")
                 self.bus.publish({"kind": "cooldown", "provider": cand["provider_name"],
                                   "key": cand["key_label"], "seconds": round(wait, 1)})
+                ROUTER_COOLDOWNS.labels(cand["provider_name"]).inc()
+                ROUTER_FAILOVERS.labels(cand["provider_name"]).inc()
+                log_event("warn", "upstream_rate_limited", provider=cand["provider_name"],
+                          key=cand["key_label"], cooldown_s=round(wait, 1))
                 continue
 
             # ---- bad / expired key ----
@@ -265,6 +282,9 @@ class Router:
                 self.limiter.release(cand, int((time.time() - t0) * 1000), status)
                 self.limiter.cool(cand, 120, f"auth {status}", key_only=True)
                 errors.append(f"{cand['provider_name']} auth {status}")
+                ROUTER_FAILOVERS.labels(cand["provider_name"]).inc()
+                log_event("warn", "upstream_auth_error", provider=cand["provider_name"],
+                          key=cand["key_label"], status=status)
                 continue
 
             # ---- upstream broken ----
@@ -274,6 +294,9 @@ class Router:
                 self.limiter.release(cand, int((time.time() - t0) * 1000), status)
                 self.limiter.cool(cand, self.s.short_cooldown, f"upstream {status}", key_only=True)
                 errors.append(f"{cand['provider_name']} {status}")
+                ROUTER_FAILOVERS.labels(cand["provider_name"]).inc()
+                log_event("warn", "upstream_error", provider=cand["provider_name"],
+                          key=cand["key_label"], status=status)
                 self.bus.publish({"kind": "retry", "provider": cand["provider_name"],
                                   "key": cand["key_label"], "reason": f"http {status}"})
                 continue
@@ -285,6 +308,9 @@ class Router:
                 self.limiter.release(cand, int((time.time() - t0) * 1000), 404)
                 self.limiter.cool(cand, 60, "404 model", key_only=True)
                 errors.append(f"{cand['provider_name']} 404")
+                ROUTER_FAILOVERS.labels(cand["provider_name"]).inc()
+                log_event("warn", "upstream_model_not_found", provider=cand["provider_name"],
+                          key=cand["key_label"])
                 continue
 
             # ---- client error: pass through, do not rotate ----
@@ -331,6 +357,9 @@ class Router:
             self.bus.publish({"kind": "ok", "provider": cand["provider_name"],
                               "key": cand["key_label"], "ms": int((time.time() - started) * 1000),
                               "model": vm["name"]})
+            log_event("info", "request_ok", provider=cand["provider_name"],
+                      key=cand["key_label"], model=vm["name"],
+                      ms=int((time.time() - started) * 1000), attempts=attempts, stream=False)
             return RouteResult(200, adapter.parse(data, vm["name"], created), None,
                                cand["provider_name"], cand["key_label"], attempts, headers_out)
 
@@ -353,6 +382,9 @@ class Router:
             self.bus.publish({"kind": "ok", "provider": cand["provider_name"],
                               "key": cand["key_label"], "ms": int((time.time() - started) * 1000),
                               "model": vm["name"], "stream": True})
+            log_event("info", "request_ok", provider=cand["provider_name"],
+                      key=cand["key_label"], model=vm["name"],
+                      ms=int((time.time() - started) * 1000), attempts=attempts, stream=True)
 
     def _log(self, vm, cand, status, started, attempts, errors, session, pt, ct):
         self.store.log(ts=time.time(), vmodel=vm.get("name"), provider=cand["provider_name"],

@@ -9,13 +9,16 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (FileResponse, JSONResponse, Response,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 
 from . import util
 from .config import settings
 from .db import Store
 from .limiter import Limiter
+from .observability import (AUTH_FAILURES, ObservabilityMiddleware, log_event,
+                            render_metrics)
 from .providers import PRESETS, preset_headers
 from .router import NoCapacity, Router, UnknownModel
 from .security import (SECURITY_HEADERS, LockoutGuard, SlidingRateLimiter,
@@ -51,6 +54,9 @@ async def lifespan(app):
         print("[warn] SECRET_KEY not set - stored upstream keys are NOT encrypted at rest.")
     print(f"[security] env={settings.env} docs={'on' if settings.enable_docs else 'off'} "
           f"cors={'on' if settings.cors else 'same-origin'} gateway_rpm={settings.gateway_rpm or 'unlimited'}")
+    log_event("info", "startup", env=settings.env, docs=settings.enable_docs,
+              cors=bool(settings.cors), gateway_rpm=settings.gateway_rpm,
+              encryption=store.box.enabled)
     store.prune_logs(settings.max_log_rows)
     try:
         yield
@@ -125,6 +131,8 @@ class HardenMiddleware:
 
 
 app.add_middleware(HardenMiddleware)
+if settings.metrics_enabled:
+    app.add_middleware(ObservabilityMiddleware)  # outermost: ids + RED metrics
 
 
 class Bus:
@@ -194,6 +202,8 @@ def gateway_auth(request: Request):
     token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
     token = token or request.headers.get("x-api-key", "")
     if not token:
+        AUTH_FAILURES.labels("gateway").inc()
+        log_event("warn", "auth_failed", surface="gateway", reason="missing")
         raise HTTPException(401, "Missing API key")
     match = False
     for gk in store.gateway:
@@ -202,6 +212,8 @@ def gateway_auth(request: Request):
     if const_eq(token, settings.admin_token):
         match = True
     if not match:
+        AUTH_FAILURES.labels("gateway").inc()
+        log_event("warn", "auth_failed", surface="gateway", reason="invalid")
         raise HTTPException(401, "Invalid API key")
     if not gw_limiter.allow(token):
         raise HTTPException(429, "Gateway rate limit exceeded")
@@ -219,6 +231,8 @@ def admin_auth(request: Request):
         admin_guard.reset(ident)
         return True
     admin_guard.fail(ident)
+    AUTH_FAILURES.labels("admin").inc()
+    log_event("warn", "auth_failed", surface="admin", ip=ident)
     raise HTTPException(401, "Invalid admin token")
 
 
@@ -252,6 +266,19 @@ async def readyz():
         return {"status": "ready"}
     except Exception:
         return JSONResponse({"status": "not-ready"}, status_code=503)
+
+
+@app.get("/metrics")
+async def metrics(request: Request):
+    if not settings.metrics_enabled:
+        raise HTTPException(404, "not found")
+    if not settings.metrics_public:
+        token = (request.headers.get("x-admin-token")
+                 or request.headers.get("authorization", "").replace("Bearer ", ""))
+        if not const_eq(token, settings.admin_token):
+            raise HTTPException(401, "unauthorized")
+    body, ctype = render_metrics()
+    return Response(content=body, media_type=ctype)
 
 
 # ---------------- OpenAI-compatible surface ----------------
