@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS gateway_keys(
   label TEXT DEFAULT '',
   key TEXT UNIQUE NOT NULL,
   enabled INTEGER DEFAULT 1,
+  allowed_models TEXT DEFAULT '',
+  max_rpm INTEGER DEFAULT 0,
   created_at REAL
 );
 CREATE TABLE IF NOT EXISTS logs(
@@ -68,6 +70,22 @@ CREATE TABLE IF NOT EXISTS logs(
   error TEXT, session TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts DESC);
+CREATE TABLE IF NOT EXISTS admin_tokens(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  label TEXT DEFAULT '',
+  token_hash TEXT UNIQUE NOT NULL,
+  role TEXT DEFAULT 'admin',
+  enabled INTEGER DEFAULT 1,
+  created_at REAL
+);
+CREATE TABLE IF NOT EXISTS audit_log(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts REAL, actor TEXT, role TEXT, action TEXT, target TEXT, detail TEXT, ip TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts DESC);
+CREATE TABLE IF NOT EXISTS schema_migrations(
+  version INTEGER PRIMARY KEY, name TEXT, applied_at REAL
+);
 """
 
 # Columns a caller is allowed to write, per table. Anything else is rejected,
@@ -79,7 +97,9 @@ COLUMNS = {
     "vmodels": {"name", "description", "strategy", "sticky", "enabled", "created_at"},
     "targets": {"vmodel_id", "provider_id", "key_id", "upstream_model", "weight",
                 "priority", "max_rpm", "max_tpm", "enabled", "created_at"},
-    "gateway_keys": {"label", "key", "enabled", "created_at"},
+    "gateway_keys": {"label", "key", "enabled", "allowed_models", "max_rpm", "created_at"},
+    "admin_tokens": {"label", "token_hash", "role", "enabled", "created_at"},
+    "audit_log": {"ts", "actor", "role", "action", "target", "detail", "ip"},
 }
 
 # Fields encrypted at rest when SECRET_KEY is configured.
@@ -100,7 +120,7 @@ class Store:
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.executescript(SCHEMA)
-        self._migrate()
+        self._run_migrations()
         self.conn.commit()
         self.providers = {}
         self.keys = {}
@@ -109,16 +129,56 @@ class Store:
         self.vmodels_by_id = {}
         self.targets = []
         self.gateway = set()
+        self.gateway_meta = {}
+        self.admin_tokens = {}
         self._logbuf = []
         self._last_flush = 0.0
         self.load()
 
     # ---------- migrations ----------
-    def _migrate(self):
-        """Add columns introduced after a database may already exist."""
-        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(providers)")}
-        if "proxy" not in cols:
+    MIGRATIONS = [
+        (1, "baseline"),
+        (2, "gateway_key_scopes"),
+        (3, "admin_tokens_and_audit"),
+    ]
+
+    def _has_column(self, table, col) -> bool:
+        return col in {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+
+    def _run_migrations(self):
+        """Apply ordered, idempotent migrations and record them."""
+        applied = {r["version"] for r in self.conn.execute("SELECT version FROM schema_migrations")}
+        for version, name in self.MIGRATIONS:
+            if version in applied:
+                continue
+            getattr(self, f"_m{version}")(name)
+            self.conn.execute(
+                "INSERT OR REPLACE INTO schema_migrations(version,name,applied_at) VALUES(?,?,?)",
+                (version, name, time.time()))
+            self.conn.commit()
+
+    def _m1(self, _name):
+        pass  # baseline schema already created above
+
+    def _m2(self, _name):
+        if not self._has_column("providers", "proxy"):
             self.conn.execute("ALTER TABLE providers ADD COLUMN proxy TEXT DEFAULT ''")
+        if not self._has_column("gateway_keys", "allowed_models"):
+            self.conn.execute("ALTER TABLE gateway_keys ADD COLUMN allowed_models TEXT DEFAULT ''")
+        if not self._has_column("gateway_keys", "max_rpm"):
+            self.conn.execute("ALTER TABLE gateway_keys ADD COLUMN max_rpm INTEGER DEFAULT 0")
+
+    def _m3(self, _name):
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS admin_tokens(
+              id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT DEFAULT '',
+              token_hash TEXT UNIQUE NOT NULL, role TEXT DEFAULT 'admin',
+              enabled INTEGER DEFAULT 1, created_at REAL);
+            CREATE TABLE IF NOT EXISTS audit_log(
+              id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, actor TEXT, role TEXT,
+              action TEXT, target TEXT, detail TEXT, ip TEXT);
+            CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts DESC);
+        """)
 
     # ---------- validation / crypto ----------
     @staticmethod
@@ -160,8 +220,19 @@ class Store:
             self.vmodels = {r["name"]: dict(r) for r in self.conn.execute("SELECT * FROM vmodels")}
             self.vmodels_by_id = {v["id"]: v for v in self.vmodels.values()}
             self.targets = [dict(r) for r in self.conn.execute("SELECT * FROM targets")]
-            self.gateway = {self.box.decrypt(r["key"]) for r in self.conn.execute(
-                "SELECT key FROM gateway_keys WHERE enabled=1")}
+            self.gateway = set()
+            self.gateway_meta = {}
+            for r in self.conn.execute("SELECT * FROM gateway_keys"):
+                if not r["enabled"]:
+                    continue
+                k = self.box.decrypt(r["key"])
+                self.gateway.add(k)
+                self.gateway_meta[k] = {"id": r["id"], "label": r["label"],
+                                        "allowed_models": (r["allowed_models"] or "") if "allowed_models" in r.keys() else "",
+                                        "max_rpm": (r["max_rpm"] or 0) if "max_rpm" in r.keys() else 0}
+            self.admin_tokens = {}
+            for r in self.conn.execute("SELECT id,token_hash,role,label FROM admin_tokens WHERE enabled=1"):
+                self.admin_tokens[r["token_hash"]] = {"id": r["id"], "role": r["role"], "label": r["label"]}
 
     # ---------- crud ----------
     def insert(self, table, data: dict):
@@ -241,6 +312,21 @@ class Store:
         with self.lock:
             self._logbuf.clear()
             self.conn.execute("DELETE FROM logs")
+            self.conn.commit()
+
+    def audit(self, actor, role, action, target="", detail="", ip=""):
+        """Append an audit record (no full cache reload)."""
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO audit_log(ts,actor,role,action,target,detail,ip) VALUES(?,?,?,?,?,?,?)",
+                (time.time(), actor, role, action, target, detail, ip))
+            self.conn.commit()
+
+    def prune_audit(self, keep: int):
+        with self.lock:
+            self.conn.execute(
+                "DELETE FROM audit_log WHERE id NOT IN (SELECT id FROM audit_log ORDER BY id DESC LIMIT ?)",
+                (keep,))
             self.conn.commit()
 
     def prune_logs(self, keep: int):

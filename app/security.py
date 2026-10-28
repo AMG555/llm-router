@@ -34,6 +34,12 @@ def const_eq(a: str, b: str) -> bool:
     return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
+def hash_token(token: str) -> str:
+    """Stable hash for storing admin API tokens (never store the token itself)."""
+    import hashlib
+    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
+
+
 class LockoutGuard:
     """Per-identity failed-attempt tracker used to slow admin brute force."""
 
