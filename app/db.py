@@ -1,5 +1,6 @@
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 from .config import settings
@@ -95,6 +96,9 @@ class Store:
         self.lock = threading.RLock()
         self.conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.executescript(SCHEMA)
         self._migrate()
         self.conn.commit()
@@ -105,6 +109,8 @@ class Store:
         self.vmodels_by_id = {}
         self.targets = []
         self.gateway = set()
+        self._logbuf = []
+        self._last_flush = 0.0
         self.load()
 
     # ---------- migrations ----------
@@ -193,6 +199,8 @@ class Store:
             self.load()
 
     def rows(self, table, where="", args=(), reveal=False):
+        if table == "logs":
+            self.flush_logs()
         sql = f"SELECT * FROM {table}"
         if where:
             sql += f" WHERE {where}"
@@ -204,18 +212,40 @@ class Store:
     def log(self, **kw):
         if not settings.log_requests:
             return
+        row = (kw.get("ts"), kw.get("vmodel"), kw.get("provider"), kw.get("key_label"),
+               kw.get("status"), kw.get("latency_ms"), kw.get("attempts"),
+               kw.get("prompt_tokens"), kw.get("completion_tokens"),
+               kw.get("error"), kw.get("session"))
         with self.lock:
-            self.conn.execute(
-                "INSERT INTO logs(ts,vmodel,provider,key_label,status,latency_ms,attempts,"
-                "prompt_tokens,completion_tokens,error,session) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (kw.get("ts"), kw.get("vmodel"), kw.get("provider"), kw.get("key_label"),
-                 kw.get("status"), kw.get("latency_ms"), kw.get("attempts"),
-                 kw.get("prompt_tokens"), kw.get("completion_tokens"),
-                 kw.get("error"), kw.get("session")))
+            self._logbuf.append(row)
+            now = time.time()
+            if len(self._logbuf) >= 50 or (now - self._last_flush) >= 1.0:
+                self._flush_logs_locked(now)
+
+    def _flush_logs_locked(self, now=None):
+        if not self._logbuf:
+            return
+        self.conn.executemany(
+            "INSERT INTO logs(ts,vmodel,provider,key_label,status,latency_ms,attempts,"
+            "prompt_tokens,completion_tokens,error,session) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            self._logbuf)
+        self.conn.commit()
+        self._logbuf.clear()
+        self._last_flush = now or time.time()
+
+    def flush_logs(self):
+        with self.lock:
+            self._flush_logs_locked()
+
+    def clear_logs(self):
+        with self.lock:
+            self._logbuf.clear()
+            self.conn.execute("DELETE FROM logs")
             self.conn.commit()
 
     def prune_logs(self, keep: int):
         with self.lock:
+            self._flush_logs_locked()
             self.conn.execute(
                 "DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT ?)",
                 (keep,))

@@ -46,23 +46,51 @@ if settings.cors:
     )
 
 
-@app.middleware("http")
-async def harden(request: Request, call_next):
-    # reject oversized bodies before doing any work
-    cl = request.headers.get("content-length")
-    if cl and cl.isdigit() and int(cl) > settings.max_body_bytes:
-        return JSONResponse({"error": {"message": "Request body too large",
-                                       "type": "invalid_request_error"}}, status_code=413)
-    resp = await call_next(request)
-    for k, v in SECURITY_HEADERS.items():
-        resp.headers.setdefault(k, v)
-    https = (request.url.scheme == "https"
-             or request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https")
-    if settings.force_https or https:
-        resp.headers.setdefault("Strict-Transport-Security",
-                                "max-age=31536000; includeSubDomains")
-    resp.headers.setdefault("Cache-Control", "no-store")
-    return resp
+class HardenMiddleware:
+    """Raw ASGI middleware for security headers + body-size cap.
+
+    Uses a pure ASGI wrapper instead of Starlette's BaseHTTPMiddleware, which
+    adds latency and can buffer streaming responses.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                   for k, v in scope.get("headers", [])}
+        cl = headers.get("content-length")
+        if cl and cl.isdigit() and int(cl) > settings.max_body_bytes:
+            resp = JSONResponse({"error": {"message": "Request body too large",
+                                           "type": "invalid_request_error"}}, status_code=413)
+            return await resp(scope, receive, send)
+
+        https = (scope.get("scheme") == "https"
+                 or headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https")
+        hsts = settings.force_https or https
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                raw = message.setdefault("headers", [])
+                have = {k.decode("latin-1").lower() for k, _ in raw}
+                def add(k, v):
+                    if k.lower() not in have:
+                        raw.append((k.lower().encode("latin-1"), v.encode("latin-1")))
+                        have.add(k.lower())
+                for k, v in SECURITY_HEADERS.items():
+                    add(k, v)
+                if hsts:
+                    add("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+                add("Cache-Control", "no-store")
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
+app.add_middleware(HardenMiddleware)
 
 
 class Bus:
@@ -133,6 +161,7 @@ async def _startup():
 
 @app.on_event("shutdown")
 async def _shutdown():
+    store.flush_logs()
     await router.aclose()
 
 
@@ -650,9 +679,7 @@ async def get_logs(limit: int = 200, _=Depends(admin_auth)):
 
 @app.delete("/admin/api/logs")
 async def clear_logs(_=Depends(admin_auth)):
-    with store.lock:
-        store.conn.execute("DELETE FROM logs")
-        store.conn.commit()
+    store.clear_logs()
     return {"ok": True}
 
 

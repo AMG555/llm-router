@@ -181,6 +181,24 @@ Operational guidance:
 
 ---
 
+## Performance
+
+The gateway adds minimal latency and streams progressively (first byte is not
+buffered). Measured against a local mock upstream through real `uvicorn`:
+
+| Scenario | Overhead vs direct |
+| --- | --- |
+| Non-stream, 250 ms upstream | **+3.4 ms (1.4%)** |
+| Stream TTFT, 250 ms upstream | **+5.2 ms (2.1%)** |
+
+The balance is the unavoidable second network hop plus ~1 ms of processing.
+Hot-path choices: WAL + buffered logging (no per-request fsync), a raw ASGI
+middleware instead of Starlette's `BaseHTTPMiddleware`, and `--no-access-log`.
+Full methodology, including a reverted experiment, is in [`PERF.md`](PERF.md).
+
+For the lowest latency, run on Linux (uvloop/httptools), keep one worker, and
+avoid an egress proxy unless you need IP pinning.
+
 ## Testing
 
 ```bash
@@ -257,7 +275,7 @@ builder if one is offered (the repo includes a `Dockerfile`); otherwise use a
 Python buildpack with:
 
 - Build: `pip install -r requirements.txt`
-- Start: `uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=*`
+- Start: `uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=* --no-access-log --log-level warning`
 - Health check path: `/health`
 
 Set `ADMIN_TOKEN`, `SECRET_KEY` and (if relevant) `ENV=production` as platform
