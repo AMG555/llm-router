@@ -76,6 +76,44 @@ async def _load_bootstrap():
 
 _persist_status = {"at": 0.0, "ok": None, "error": ""}
 _bootstrap_status = {"url_set": None, "b64_set": None, "result": "not_run"}
+_boot_attempted = False
+_boot_lock = asyncio.Lock()
+
+
+async def _ensure_bootstrapped():
+    """Import config from BOOTSTRAP_URL/CONFIG once, when the DB is empty.
+
+    Runs from startup AND (idempotently) on the first request, so restore
+    does not depend on startup timing.
+    """
+    global _boot_attempted
+    if _boot_attempted:
+        return
+    async with _boot_lock:
+        if _boot_attempted:
+            return
+        _boot_attempted = True
+        _bootstrap_status["url_set"] = bool(settings.bootstrap_url)
+        _bootstrap_status["b64_set"] = bool(settings.bootstrap)
+        if store.providers:
+            _bootstrap_status["result"] = "skipped_db_not_empty"
+            return
+        if not (settings.bootstrap_url or settings.bootstrap):
+            _bootstrap_status["result"] = "disabled"
+            return
+        try:
+            cfg = await _load_bootstrap()
+            if cfg:
+                import_config(cfg)
+                _bootstrap_status["result"] = f"loaded:{len(store.providers)}"
+                log_event("info", "bootstrap_loaded", providers=len(store.providers))
+            else:
+                _bootstrap_status["result"] = "empty"
+                log_event("info", "bootstrap_empty")
+        except Exception as e:
+            _bootstrap_status["result"] = f"error: {str(e)[:160]}"
+            print("bootstrap failed:", e)
+            log_event("warn", "bootstrap_error", error=str(e)[:200])
 
 
 async def persist_config():
@@ -144,24 +182,7 @@ class PersistMiddleware:
 @asynccontextmanager
 async def lifespan(app):
     bus.bind(asyncio.get_running_loop())
-    if not store.providers:
-        _bootstrap_status["url_set"] = bool(settings.bootstrap_url)
-        _bootstrap_status["b64_set"] = bool(settings.bootstrap)
-        try:
-            cfg = await _load_bootstrap()
-            if cfg:
-                import_config(cfg)
-                _bootstrap_status["result"] = f"loaded:{len(store.providers)}"
-                log_event("info", "bootstrap_loaded", providers=len(store.providers))
-            else:
-                _bootstrap_status["result"] = "empty"
-                log_event("info", "bootstrap_empty")
-        except Exception as e:
-            _bootstrap_status["result"] = f"error: {str(e)[:160]}"
-            print("bootstrap failed:", e)
-            log_event("warn", "bootstrap_error", error=str(e)[:200])
-    else:
-        _bootstrap_status["result"] = "skipped_db_not_empty"
+    await _ensure_bootstrapped()
     if settings.gateway_key:
         if register_gateway_key(settings.gateway_key, "env"):
             print("[gateway] registered GATEWAY_KEY from environment")
@@ -226,6 +247,10 @@ class HardenMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
+
+        # Idempotent, first-request restore guard (belt-and-braces if the
+        # startup hook didn't run under the host's deploy model).
+        await _ensure_bootstrapped()
 
         headers = {k.decode("latin-1").lower(): v.decode("latin-1")
                    for k, v in scope.get("headers", [])}
