@@ -7,6 +7,8 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
+
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -66,6 +68,66 @@ async def _load_bootstrap():
             r.raise_for_status()
             return r.json()
     return None
+
+
+async def persist_config():
+    """PUT the full config to PERSIST_URL so it survives restarts."""
+    if not settings.persist_url:
+        return
+    try:
+        data = await export(1)
+        headers = {"content-type": "application/json"}
+        if settings.persist_token:
+            headers["authorization"] = f"Bearer {settings.persist_token}"
+        async with httpx.AsyncClient(timeout=15) as c:
+            await c.put(settings.persist_url, json=data, headers=headers)
+        log_event("info", "config_persisted")
+    except Exception as e:
+        log_event("warn", "config_persist_failed", error=str(e))
+
+
+_persist_scheduled = False
+
+
+def _schedule_persist():
+    global _persist_scheduled
+    if _persist_scheduled:
+        return
+    _persist_scheduled = True
+
+    async def _later():
+        global _persist_scheduled
+        try:
+            await asyncio.sleep(2)  # coalesce bursts of edits
+            await persist_config()
+        finally:
+            _persist_scheduled = False
+
+    asyncio.get_running_loop().create_task(_later())
+
+
+class PersistMiddleware:
+    """After a successful admin mutation, persist the config (debounced)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not settings.persist_url:
+            return await self.app(scope, receive, send)
+        method = scope.get("method", "")
+        path = scope.get("path", "")
+        watch = method in ("POST", "PATCH", "DELETE") and path.startswith("/admin/api/")
+        status = {"code": 0}
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                status["code"] = message["status"]
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+        if watch and 200 <= status["code"] < 300:
+            _schedule_persist()
 
 
 @asynccontextmanager
@@ -173,6 +235,7 @@ class HardenMiddleware:
 app.add_middleware(HardenMiddleware)
 if settings.metrics_enabled:
     app.add_middleware(ObservabilityMiddleware)  # outermost: ids + RED metrics
+app.add_middleware(PersistMiddleware)
 
 
 class Bus:

@@ -68,6 +68,10 @@ class Settings:
         # Optional URL to a JSON config restored on boot when the DB is empty
         # (survives ephemeral filesystems without a paid disk).
         self.bootstrap_url = os.getenv("BOOTSTRAP_URL", "").strip()
+        # Optional URL to auto-PUT the full config to after every change
+        # (paired with BOOTSTRAP_URL for durable free-tier persistence).
+        self.persist_url = os.getenv("PERSIST_URL", "").strip()
+        self.persist_token = os.getenv("PERSIST_TOKEN", "").strip()
         self.log_requests = _bool(os.getenv("LOG_REQUESTS"), True)
         self.max_log_rows = int(os.getenv("MAX_LOG_ROWS", "5000"))
 

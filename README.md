@@ -381,6 +381,12 @@ after every restart. Get the base64 for `BOOTSTRAP_CONFIG` from
 `GET /admin/api/bootstrap-b64` (admin), or just host the file and use
 `BOOTSTRAP_URL`.
 
+**Fully automatic persistence:** set `PERSIST_URL` (and optional
+`PERSIST_TOKEN`) to an endpoint you control and the router will **PUT the full
+config there after every change** (debounced). Point `BOOTSTRAP_URL` at the
+same URL and your setup survives restarts with **no manual re-entry**. The
+payload contains provider keys — host it privately.
+
 Also set `GATEWAY_KEY` to a fixed value so your applications keep the same key
 across restarts (otherwise a fresh one is generated on each cold boot).
 

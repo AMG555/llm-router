@@ -22,6 +22,7 @@ sys.path.insert(0, os.getcwd())
 
 # api_key -> (mode, label). Modes: ok, 429, 500, 401, 404, anthropic, anthropic-tool, gemini
 BEHAVIOR = {}
+PERSISTED = []
 
 
 class MockHandler(BaseHTTPRequestHandler):
@@ -42,6 +43,14 @@ class MockHandler(BaseHTTPRequestHandler):
             self._json({"object": "list", "data": [{"id": "mock-model"}]})
         else:
             self._json({"error": "not found"}, 404)
+
+    def do_PUT(self):
+        n = int(self.headers.get("content-length", 0))
+        try:
+            PERSISTED.append(json.loads(self.rfile.read(n) if n else b"{}"))
+        except ValueError:
+            PERSISTED.append({})
+        self._json({"ok": True})
 
     def do_POST(self):
         key = self._key()
@@ -168,7 +177,9 @@ def upstream():
     yield {"openai": f"http://127.0.0.1:{port}/v1",
            "anthropic": f"http://127.0.0.1:{port}/v1",
            "gemini": f"http://127.0.0.1:{port}/v1beta",
-           "behavior": BEHAVIOR}
+           "base": f"http://127.0.0.1:{port}",
+           "behavior": BEHAVIOR,
+           "persisted": PERSISTED}
     srv.shutdown()
 
 
