@@ -273,26 +273,26 @@ class Router:
 
             # ---- bad / expired key ----
             if status in (401, 403):
-                await resp.aread()
+                snippet = (await resp.aread()).decode(errors="replace")[:200]
                 await resp.aclose()
                 self.limiter.release(cand, int((time.time() - t0) * 1000), status)
                 await self.limiter.cool(cand, 120, f"auth {status}", key_only=True)
-                errors.append(f"{cand['provider_name']} auth {status}")
+                errors.append(f"{cand['provider_name']} auth {status}: {snippet}")
                 ROUTER_FAILOVERS.labels(cand["provider_name"]).inc()
                 log_event("warn", "upstream_auth_error", provider=cand["provider_name"],
-                          key=cand["key_label"], status=status)
+                          key=cand["key_label"], status=status, detail=snippet)
                 continue
 
             # ---- upstream broken ----
             if status >= 500 or status == 408:
-                txt = await resp.aread()
+                snippet = (await resp.aread()).decode(errors="replace")[:200]
                 await resp.aclose()
                 self.limiter.release(cand, int((time.time() - t0) * 1000), status)
                 await self.limiter.cool(cand, self.s.short_cooldown, f"upstream {status}", key_only=True)
-                errors.append(f"{cand['provider_name']} {status}")
+                errors.append(f"{cand['provider_name']} {status}: {snippet}")
                 ROUTER_FAILOVERS.labels(cand["provider_name"]).inc()
                 log_event("warn", "upstream_error", provider=cand["provider_name"],
-                          key=cand["key_label"], status=status)
+                          key=cand["key_label"], status=status, detail=snippet)
                 self.bus.publish({"kind": "retry", "provider": cand["provider_name"],
                                   "key": cand["key_label"], "reason": f"http {status}"})
                 continue
