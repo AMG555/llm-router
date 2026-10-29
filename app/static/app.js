@@ -278,6 +278,10 @@ const HANDLERS = {
     toast("Persist", r.ok ? "saved" : (r.error || "failed"), r.ok ? "ok" : "bad");
     refresh();
   }).catch(handleError),
+  "restore": () => api("/admin/api/restore", { method: "POST" }).then((r) => {
+    toast("Restore", r.ok ? `imported ${r.providers} provider(s)` : (r.error || r.result || "nothing to restore"), r.ok ? "ok" : "warn");
+    refresh();
+  }).catch(handleError),
 
   "add-key": (el) => newKeyModal(+el.dataset.id),
   "del-key": (el) => confirmDialog("Delete this key? In-flight requests continue.", { confirmLabel: "Delete" }).then((ok) => ok && api(`/admin/api/keys/${el.dataset.id}`, { method: "DELETE" }).then(refresh)),
