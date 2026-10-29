@@ -47,7 +47,7 @@ code,kbd,pre{font-family:var(--font-mono)}
 ::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:99px;border:2px solid var(--bg)}
 ::-webkit-scrollbar-track{background:transparent}
 
-.skip-link{position:fixed;left:-100px;top:10px;z-index:200;background:var(--text);color:var(--surface);padding:8px 14px;border-radius:8px}
+.skip-link{position:fixed;left:-9999px;top:8px;z-index:200;background:var(--text);color:var(--surface);padding:8px 14px;border-radius:8px}
 .skip-link:focus{left:10px}
 .muted{color:var(--muted)}
 .spacer{flex:1}
@@ -287,5 +287,10 @@ td.num,th.num{font-family:var(--font-mono);font-size:12.5px;font-variant-numeric
   .grid-2{grid-template-columns:1fr}
   .grid-3{grid-template-columns:1fr}
   .brand-name{display:none}
+}
+@media (max-width:560px){
+  #envChip,#encChip,#roleChip{display:none}
+  .appbar{gap:10px;padding:0 12px}
+  .snippet-row code{overflow-wrap:anywhere}
 }
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
