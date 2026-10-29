@@ -50,6 +50,16 @@ def test_persist_puts_config(app_module, upstream):
     assert "providers" in upstream["persisted"][-1]
 
 
+def test_load_bootstrap_url_404_is_empty(app_module, upstream):
+    old_c, old_u = settings.bootstrap, settings.bootstrap_url
+    settings.bootstrap = ""
+    settings.bootstrap_url = upstream["base"] + "/missing.json"  # mock returns 404
+    try:
+        assert asyncio.run(app_module._load_bootstrap()) is None
+    finally:
+        settings.bootstrap, settings.bootstrap_url = old_c, old_u
+
+
 def test_persist_now_endpoint(client, admin_h):
     r = client.post("/admin/api/persist", headers=admin_h)
     assert r.status_code == 200

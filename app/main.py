@@ -67,6 +67,8 @@ async def _load_bootstrap():
             headers["authorization"] = f"Bearer {settings.persist_token}"
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.get(settings.bootstrap_url, headers=headers)
+            if r.status_code == 404:
+                return None  # store is empty
             r.raise_for_status()
             return r.json()
     return None
