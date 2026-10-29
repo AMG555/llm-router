@@ -48,3 +48,34 @@ So a Worker in front is **not** the lever for burn. What actually reduces burn:
 - Streaming works: the Worker returns the upstream body as a readable stream.
 - Every API call gains one round trip; measure before routing production
   `/v1/*` through it.
+
+---
+
+## Durable config store (fixes free-tier "re-add after every restart")
+
+Free hosts wipe the disk on restart. `config-store.js` is a tiny **Workers KV**
+endpoint the router can auto-save to and restore from:
+
+```bash
+cd deploy/cloudflare-worker
+npx wrangler kv namespace create CONFIG          # copy the id
+cp config-store.wrangler.toml.example wrangler.toml   # paste the id
+npx wrangler secret put AUTH_TOKEN               # long random string
+npx wrangler deploy
+```
+
+Then on the **gateway** (Render) set:
+
+```dotenv
+PERSIST_URL=https://llm-router-config-store.<you>.workers.dev/config
+BOOTSTRAP_URL=https://llm-router-config-store.<you>.workers.dev/config
+PERSIST_TOKEN=<the AUTH_TOKEN you set>
+```
+
+Now every config change is saved to KV (debounced), and on each cold boot the
+router restores it automatically — **no manual re-entry**. KV free tier
+(100k reads/day, 1k writes/day) is far more than this needs.
+
+Security: the stored JSON contains provider API keys, so the store requires the
+bearer token for both read and write; treat `AUTH_TOKEN` as a secret.
+

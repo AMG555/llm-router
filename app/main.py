@@ -62,9 +62,11 @@ async def _load_bootstrap():
     if settings.bootstrap:
         return json.loads(base64.b64decode(settings.bootstrap).decode())
     if settings.bootstrap_url:
-        import httpx
+        headers = {}
+        if settings.persist_token:
+            headers["authorization"] = f"Bearer {settings.persist_token}"
         async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.get(settings.bootstrap_url)
+            r = await c.get(settings.bootstrap_url, headers=headers)
             r.raise_for_status()
             return r.json()
     return None

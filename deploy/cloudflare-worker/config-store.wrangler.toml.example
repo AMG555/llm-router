@@ -1,0 +1,11 @@
+# Durable config store (Workers KV)
+#   npx wrangler kv namespace create CONFIG      # copy the id below
+#   npx wrangler secret put AUTH_TOKEN           # paste a long random string
+#   npx wrangler deploy
+name = "llm-router-config-store"
+main = "config-store.js"
+compatibility_date = "2025-01-01"
+
+[[kv_namespaces]]
+binding = "CONFIG"
+id = "<paste-kv-namespace-id>"
