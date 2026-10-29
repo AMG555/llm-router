@@ -31,13 +31,28 @@ limiter = Limiter(settings)
 admin_guard = LockoutGuard(settings.admin_max_fails, settings.admin_lock_seconds)
 gw_limiter = KeyedRateLimiter()
 
+async def _load_bootstrap():
+    """Return bootstrap config from BOOTSTRAP_CONFIG (base64) or BOOTSTRAP_URL."""
+    if settings.bootstrap:
+        return json.loads(base64.b64decode(settings.bootstrap).decode())
+    if settings.bootstrap_url:
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(settings.bootstrap_url)
+            r.raise_for_status()
+            return r.json()
+    return None
+
+
 @asynccontextmanager
 async def lifespan(app):
     bus.bind(asyncio.get_running_loop())
-    if settings.bootstrap and not store.providers:
+    if not store.providers:
         try:
-            cfg = json.loads(base64.b64decode(settings.bootstrap).decode())
-            import_config(cfg)
+            cfg = await _load_bootstrap()
+            if cfg:
+                import_config(cfg)
+                log_event("info", "bootstrap_loaded", providers=len(store.providers))
         except Exception as e:
             print("bootstrap failed:", e)
     if settings.gateway_key:
@@ -842,6 +857,13 @@ async def export(reveal: int = 0, _=Depends(admin_auth)):
         for p in data["providers"]:
             p["headers"] = "{}"
     return data
+
+
+@app.get("/admin/api/bootstrap-b64")
+async def bootstrap_b64(reveal: int = 1, _=Depends(admin_auth)):
+    """Current config as base64, ready for the BOOTSTRAP_CONFIG env var."""
+    data = await export(reveal)
+    return {"b64": base64.b64encode(json.dumps(data).encode()).decode()}
 
 
 def _reject_masked(value: str, field: str):

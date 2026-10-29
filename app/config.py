@@ -65,6 +65,9 @@ class Settings:
 
         # --- misc ---
         self.bootstrap = os.getenv("BOOTSTRAP_CONFIG", "").strip()
+        # Optional URL to a JSON config restored on boot when the DB is empty
+        # (survives ephemeral filesystems without a paid disk).
+        self.bootstrap_url = os.getenv("BOOTSTRAP_URL", "").strip()
         self.log_requests = _bool(os.getenv("LOG_REQUESTS"), True)
         self.max_log_rows = int(os.getenv("MAX_LOG_ROWS", "5000"))
 

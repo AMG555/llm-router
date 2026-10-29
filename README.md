@@ -374,6 +374,13 @@ Store the output as `BOOTSTRAP_CONFIG`. On every cold boot the router rebuilds
 itself from that value. For durable storage, mount a volume, use a managed
 disk, or point `DB_PATH` at a persistent location.
 
+**Restore from a URL instead (easier on ephemeral hosts):** put the exported
+JSON somewhere reachable and set `BOOTSTRAP_URL`. On boot, if the DB is empty,
+the router fetches and imports it — so providers, keys and models come back
+after every restart. Get the base64 for `BOOTSTRAP_CONFIG` from
+`GET /admin/api/bootstrap-b64` (admin), or just host the file and use
+`BOOTSTRAP_URL`.
+
 Also set `GATEWAY_KEY` to a fixed value so your applications keep the same key
 across restarts (otherwise a fresh one is generated on each cold boot).
 

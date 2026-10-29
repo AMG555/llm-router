@@ -36,7 +36,9 @@ class MockHandler(BaseHTTPRequestHandler):
         return a[7:].strip() if a.lower().startswith("bearer ") else a
 
     def do_GET(self):
-        if self.path.endswith("/models"):
+        if self.path.endswith("/bootstrap.json"):
+            self._json({"providers": [], "gateway_keys": []})
+        elif self.path.endswith("/models"):
             self._json({"object": "list", "data": [{"id": "mock-model"}]})
         else:
             self._json({"error": "not found"}, 404)
