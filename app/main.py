@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import secrets
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -30,6 +31,29 @@ store = Store(settings.db_path)
 limiter = Limiter(settings)
 admin_guard = LockoutGuard(settings.admin_max_fails, settings.admin_lock_seconds)
 gw_limiter = KeyedRateLimiter()
+
+# Short-lived, reusable tickets for the SSE stream so the long-lived admin
+# token never appears in a URL (logs, history, referrers).
+_stream_tickets = {}
+_stream_lock = threading.Lock()
+STREAM_TTL = 120
+
+
+def _issue_stream_ticket(ttl=STREAM_TTL):
+    t = secrets.token_urlsafe(24)
+    now = time.time()
+    with _stream_lock:
+        for k in [k for k, v in list(_stream_tickets.items()) if v < now]:
+            _stream_tickets.pop(k, None)
+        _stream_tickets[t] = now + ttl
+    return t
+
+
+def _valid_stream_ticket(t):
+    if not t:
+        return False
+    with _stream_lock:
+        return _stream_tickets.get(t, 0) > time.time()
 
 async def _load_bootstrap():
     """Return bootstrap config from BOOTSTRAP_CONFIG (base64) or BOOTSTRAP_URL."""
@@ -818,9 +842,14 @@ async def clear_logs(_=Depends(admin_auth)):
     return {"ok": True}
 
 
+@app.get("/admin/api/stream-ticket")
+async def stream_ticket(_=Depends(admin_auth)):
+    return {"ticket": _issue_stream_ticket(), "expires_in": STREAM_TTL}
+
+
 @app.get("/admin/api/stream")
-async def stream(request: Request, token: str = ""):
-    if not _admin_identity(token):
+async def stream(request: Request, ticket: str = "", token: str = ""):
+    if not (_valid_stream_ticket(ticket) or _admin_identity(token)):
         raise HTTPException(401, "bad token")
     q = bus.subscribe()
 

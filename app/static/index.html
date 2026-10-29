@@ -190,8 +190,9 @@
         </div>
         <div class="panel">
           <div class="panel-head"><h2>Portability</h2></div>
-          <p class="hint">Export your configuration as JSON, or import it on another instance (or via <code>BOOTSTRAP_CONFIG</code>).</p>
+          <p class="hint">Export your configuration as JSON, or import it on another instance. On hosts with an ephemeral disk, set <code>BOOTSTRAP_CONFIG</code> (base64) or <code>BOOTSTRAP_URL</code> so config is restored on restart.</p>
           <div class="toolbar">
+            <button class="btn ghost" data-action="copy-bootstrap"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>Copy bootstrap</button>
             <button class="btn ghost" data-action="export-config"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>Export</button>
             <button class="btn ghost" data-action="import-config"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3M7 8l5-5 5 5M5 21h14"/></svg>Import</button>
             <input id="importFile" type="file" accept="application/json" hidden>

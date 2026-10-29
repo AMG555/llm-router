@@ -54,6 +54,13 @@ def test_stream_token_checked(client):
     assert client.get("/admin/api/stream?token=bad").status_code == 401
 
 
+def test_stream_uses_short_lived_ticket(client, admin_h):
+    assert client.get("/admin/api/stream?ticket=nope").status_code == 401
+    r = client.get("/admin/api/stream-ticket", headers=admin_h)
+    assert r.status_code == 200
+    assert r.json()["ticket"] and r.json()["expires_in"] > 0
+
+
 def test_provider_validation(client, admin_h):
     assert client.post("/admin/api/providers", headers=admin_h,
                        json={"name": "x", "base_url": "ftp://nope"}).status_code == 400

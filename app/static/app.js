@@ -266,6 +266,7 @@ const HANDLERS = {
   "edit-gw": (el) => { const g = (STATE.gateway_keys || []).find((x) => x.id === +el.dataset.id); if (g) gwKeyModal(g); },
   "save-token": () => { localStorage.setItem(TOKEN_KEY, $("#adminToken").value.trim()); toast("Token saved", "", "ok"); refresh(); connectStream(); },
   "export-config": () => exportConfig(),
+  "copy-bootstrap": () => api("/admin/api/bootstrap-b64").then((r) => copy(r.b64, "BOOTSTRAP_CONFIG copied")).catch(handleError),
   "import-config": () => $("#importFile").click(),
   "clear-logs": () => clearLogs(),
   "pause-feed": (el) => togglePause(el),
@@ -846,17 +847,31 @@ function empty(inner) { return `<div class="empty">${inner}</div>`; }
 
 /* ---------------- data + stream ---------------- */
 let stream = null;
+let streamTimer = null;
 function setConn(state) {
   const b = $("#connBadge");
   b.classList.toggle("on", state === "on");
   b.classList.toggle("off", state === "off" || state === "locked");
   $("#connText").textContent = state === "on" ? "live" : state === "locked" ? "locked" : "offline";
 }
-function connectStream() {
+async function connectStream() {
   if (stream) stream.close();
-  stream = new EventSource("/admin/api/stream?token=" + encodeURIComponent(token()));
+  if (streamTimer) { clearTimeout(streamTimer); streamTimer = null; }
+  // Never put the long-lived admin token in the URL: use a short-lived ticket.
+  let url = "/admin/api/stream";
+  try {
+    const r = await api("/admin/api/stream-ticket");
+    url += "?ticket=" + encodeURIComponent(r.ticket);
+  } catch (_) {
+    url += "?token=" + encodeURIComponent(token());
+  }
+  stream = new EventSource(url);
   stream.onopen = () => { setConn("on"); hideOffline(); };
-  stream.onerror = () => { setConn("off"); showOffline(); };
+  stream.onerror = () => {
+    setConn("off"); showOffline();
+    if (stream) stream.close();
+    streamTimer = setTimeout(connectStream, 5000);
+  };
   stream.onmessage = (e) => { try { pushEvent(JSON.parse(e.data)); } catch (_) {} };
 }
 function showOffline() { const b = $("#offline"); if (b) b.hidden = false; }
