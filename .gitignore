@@ -23,3 +23,7 @@ deploy/cloudflare-worker/.kv_id
 deploy/cloudflare-worker/.token
 deploy/cloudflare-worker/.subdomain
 .wrangler/
+
+# local ops scratch files
+.render_deploy
+.render_*
