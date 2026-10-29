@@ -284,6 +284,7 @@ const HANDLERS = {
   }).catch(handleError),
 
   "add-key": (el) => newKeyModal(+el.dataset.id),
+  "edit-provider": (el) => editProviderModal(+el.dataset.id),
   "del-key": (el) => confirmDialog("Delete this key? In-flight requests continue.", { confirmLabel: "Delete" }).then((ok) => ok && api(`/admin/api/keys/${el.dataset.id}`, { method: "DELETE" }).then(refresh)),
   "toggle-key": (el) => api(`/admin/api/keys/${el.dataset.id}`, { method: "PATCH", body: { enabled: +el.dataset.next } }).then(refresh),
   "reset-key": (el) => api(`/admin/api/keys/${el.dataset.id}/reset`, { method: "POST" }).then(() => { toast("Key reset", "", "ok"); refresh(); }),
@@ -519,6 +520,34 @@ function renderTeam() {
       <td class="mono muted">${esc(a.ip)}</td></tr>`).join("");
   $("#audit").innerHTML = `<table><thead><tr><th>Time</th><th>Actor</th><th>Role</th><th>Action</th><th>IP</th></tr></thead>
     <tbody>${arows || emptyRow(5, "No admin activity yet.")}</tbody></table>`;
+}
+
+function editProviderModal(pid) {
+  const p = (STATE.providers || []).find((x) => x.id === pid);
+  if (!p) return;
+  const adapters = ["openai", "anthropic", "gemini"]
+    .map((a) => `<option value="${a}"${p.adapter === a ? " selected" : ""}>${a}</option>`).join("");
+  formDialog({
+    title: "Edit provider",
+    sub: "Change the base URL, adapter or egress proxy. Leave the proxy blank to keep the current one.",
+    submitLabel: "Save",
+    body: `
+      <div class="field"><label for="epName">Name</label><input id="epName" value="${esc(p.name)}"></div>
+      <div class="field"><label for="epAdapter">Adapter</label><select id="epAdapter">${adapters}</select></div>
+      <div class="field"><label for="epBase">Base URL</label><input id="epBase" value="${esc(p.base_url)}"></div>
+      <div class="field"><label for="epProxy">Egress proxy</label><input id="epProxy" placeholder="http://user:pass@host:port"><div class="help">${p.proxy_set ? "A proxy is currently set. Type a new one to replace, or leave blank to keep it." : "Route this provider's calls through a fixed IP (e.g. a residential proxy)."}</div></div>
+      <div class="field"><label for="epHeaders">Extra headers (JSON)</label><input id="epHeaders" value='${esc(p.headers || "{}")}'></div>`,
+    onSubmit: async (modal) => {
+      const body = { name: $("#epName", modal).value.trim(), adapter: $("#epAdapter", modal).value,
+                     base_url: $("#epBase", modal).value.trim() };
+      const proxy = $("#epProxy", modal).value.trim();
+      if (proxy) body.proxy = proxy;
+      try { body.headers = JSON.parse($("#epHeaders", modal).value || "{}"); }
+      catch (e) { throw new Error("headers must be valid JSON"); }
+      await api(`/admin/api/providers/${pid}`, { method: "PATCH", body });
+      toast("Provider updated", "", "ok");
+    },
+  });
 }
 
 async function gwKeyModal(g) {
@@ -764,6 +793,7 @@ function renderProviders() {
         ${p.enabled ? "" : '<span class="pill off">disabled</span>'}
         <span class="spacer"></span>
         <button class="btn sm" data-action="add-key" data-id="${p.id}">Add key</button>
+        <button class="btn sm ghost" data-action="edit-provider" data-id="${p.id}">Edit</button>
         <button class="btn sm ghost" data-action="toggle-provider" data-id="${p.id}" data-next="${p.enabled ? 0 : 1}">${p.enabled ? "Disable" : "Enable"}</button>
         <button class="btn sm danger" data-action="del-provider" data-id="${p.id}">Delete</button>
       </div>
