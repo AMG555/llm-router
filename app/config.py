@@ -59,9 +59,12 @@ class Settings:
         # Optional Redis URL: shares rate windows and cooldowns across
         # instances. Empty = in-process state (single instance).
         self.redis_url = os.getenv("REDIS_URL", "").strip()
-        # Optional URL returning the caller's public IP (e.g. an IP echo
-        # service); used by GET /admin/api/egress?check=1.
-        self.egress_check_url = os.getenv("EGRESS_CHECK_URL", "").strip()
+        # Optional URL returning the caller's public IP (an IP echo service).
+        # Used to watch the egress IP. Defaults to api.ipify.org; set to an
+        # empty string to disable the watch.
+        self.egress_check_url = os.getenv("EGRESS_CHECK_URL", "https://api.ipify.org").strip()
+        # How often (seconds) to re-check the public egress IP.
+        self.egress_check_interval = int(os.getenv("EGRESS_CHECK_INTERVAL", "900"))
 
         # --- misc ---
         self.bootstrap = os.getenv("BOOTSTRAP_CONFIG", "").strip()

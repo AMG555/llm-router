@@ -17,6 +17,7 @@ os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="llmrouter-test-"),
 os.environ["ENV"] = "test"
 os.environ["CORS_ORIGINS"] = ""
 os.environ["ENABLE_DOCS"] = "false"
+os.environ["EGRESS_CHECK_URL"] = ""  # disable the egress public-IP watch in tests
 
 sys.path.insert(0, os.getcwd())
 

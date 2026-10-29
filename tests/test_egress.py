@@ -64,6 +64,16 @@ def test_migration_adds_proxy_column_to_legacy_db():
     assert store.providers[1]["proxy"] == "http://proxy.example:3128"
 
 
+def test_egress_reports_public_ip_key(client, admin_h):
+    r = client.get("/admin/api/egress", headers=admin_h).json()
+    assert "public_ip" in r and "public_ip_changed" in r
+
+
+def test_state_meta_has_egress(client, admin_h):
+    meta = client.get("/admin/api/state", headers=admin_h).json()["meta"]
+    assert "egress" in meta and "ip" in meta["egress"]
+
+
 def test_egress_endpoint_requires_admin_and_reports(client, admin_h):
     assert client.get("/admin/api/egress").status_code == 401
     r = client.get("/admin/api/egress", headers=admin_h)

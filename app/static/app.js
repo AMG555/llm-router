@@ -601,9 +601,9 @@ async function testModel(name) {
 }
 async function probeEgress() {
   try {
-    const r = await api("/admin/api/egress");
-    const proxies = Object.keys(r.providers || {}).length;
-    toast("Egress probe", `local IP ${r.local_ip} · global proxy ${r.global_proxy_set ? "set" : "not set"} · ${proxies} provider override(s)`, "ok");
+    const r = await api("/admin/api/egress?check=1");
+    toast("Egress probe", `public IP ${r.public_ip || "?"}${r.public_ip_changed ? " (changed!)" : ""} · local ${r.local_ip} · global proxy ${r.global_proxy_set ? "set" : "not set"}`, "ok");
+    refresh();
   } catch (err) { handleError(err); }
 }
 function toggleEntity(el) {
@@ -838,6 +838,10 @@ function renderSettings() {
     $("#diagPersist").textContent = "on · pending";
   }
   $("#diagIp").textContent = "click probe";
+  const eg = meta.egress || {};
+  $("#diagPublic").innerHTML = eg.ip
+    ? (eg.changed ? `<span style="color:var(--warn)">${esc(eg.ip)} (changed!)</span>` : esc(eg.ip))
+    : '<span class="muted">unknown</span>';
   const base = location.origin + "/v1";
   $("#baseUrl").textContent = base;
   $("#curlSample").textContent =

@@ -79,6 +79,40 @@ _bootstrap_status = {"url_set": None, "b64_set": None, "result": "not_run"}
 _boot_attempted = False
 _boot_lock = asyncio.Lock()
 
+# Egress public-IP watch: auto-checks the outbound IP and flags changes.
+_egress_watch = {"ip": "", "prev": "", "first_seen": 0.0, "last_checked": 0.0, "changed_at": 0.0}
+_egress_task = None
+
+
+async def check_egress_ip():
+    if not settings.egress_check_url:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(settings.egress_check_url)
+        ip = (r.text or "").strip().split()[0] if r.text else ""
+        if not ip or len(ip) > 64:
+            return
+        now = time.time()
+        _egress_watch["last_checked"] = now
+        if not _egress_watch["ip"]:
+            _egress_watch["ip"] = ip
+            _egress_watch["first_seen"] = now
+        elif ip != _egress_watch["ip"]:
+            _egress_watch["prev"] = _egress_watch["ip"]
+            _egress_watch["ip"] = ip
+            _egress_watch["changed_at"] = now
+            log_event("warn", "egress_ip_changed", old=_egress_watch["prev"], new=ip)
+    except Exception as e:
+        log_event("warn", "egress_check_failed", error=str(e)[:120])
+
+
+async def _egress_watch_loop():
+    await asyncio.sleep(5)
+    while True:
+        await check_egress_ip()
+        await asyncio.sleep(max(60, settings.egress_check_interval))
+
 
 async def _ensure_bootstrapped():
     """Import config from BOOTSTRAP_URL/CONFIG once, when the DB is empty.
@@ -206,9 +240,14 @@ async def lifespan(app):
     # disk that survived) so an empty store gets populated automatically.
     if settings.persist_url and store.providers:
         await persist_config()
+    global _egress_task
+    if settings.egress_check_url:
+        _egress_task = asyncio.create_task(_egress_watch_loop())
     try:
         yield
     finally:
+        if _egress_task:
+            _egress_task.cancel()
         store.flush_logs()
         await router.aclose()
 
@@ -583,7 +622,11 @@ async def admin_state(who=Depends(admin_auth)):
                  "gateway_rpm": settings.gateway_rpm,
                  "persistence": bool(settings.persist_url),
                  "persist_status": _persist_status,
-                 "bootstrap": _bootstrap_status},
+                 "bootstrap": _bootstrap_status,
+                 "egress": {"ip": _egress_watch["ip"],
+                            "changed": bool(_egress_watch["changed_at"]),
+                            "changed_at": _egress_watch["changed_at"],
+                            "last_checked": _egress_watch["last_checked"]}},
     }
 
 
@@ -632,16 +675,12 @@ async def admin_egress(check: int = 0, _=Depends(admin_auth)):
     for e in egress_ids:
         usage[util.mask_proxy(e) if e != "default" else "default"] = await limiter.egress_usage(e)
     info["usage_1m"] = usage
+    info["public_ip"] = _egress_watch["ip"]
+    info["public_ip_changed"] = bool(_egress_watch["changed_at"])
     if check:
-        if not settings.egress_check_url:
-            info["check_error"] = "EGRESS_CHECK_URL is not configured"
-        else:
-            try:
-                r = await router.client_for(None).get(settings.egress_check_url, timeout=10)
-                info["check_url"] = settings.egress_check_url
-                info["observed"] = r.text.strip()[:200]
-            except Exception as e:
-                info["check_error"] = str(e)
+        await check_egress_ip()
+        info["public_ip"] = _egress_watch["ip"]
+        info["public_ip_changed"] = bool(_egress_watch["changed_at"])
     return info
 
 
