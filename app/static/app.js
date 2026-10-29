@@ -680,7 +680,14 @@ function renderModels() {
   const models = (STATE.vmodels || []).filter((v) => !q || v.name.toLowerCase().includes(q));
   const host = $("#models");
   if (!models.length) {
-    host.innerHTML = empty(`<h3>No virtual models</h3><p>Create a model, then point it at one or more targets.</p>
+    host.innerHTML = empty(`<h3>No virtual models yet</h3>
+      <p>A virtual model is the <b>name your app sends</b> (e.g. <code>fast-chat</code>). It maps to one or more upstream models.</p>
+      <div class="muted" style="text-align:left;max-width:520px;margin:0 auto 14px">
+        <div>1. Add a provider and its API key(s).</div>
+        <div>2. Create a virtual model.</div>
+        <div>3. Add a target: provider + upstream model id (key = “any key in pool”).</div>
+        <div>4. Copy your gateway key from Settings and call <code>/v1</code>.</div>
+      </div>
       <button class="btn" data-action="new-model"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New model</button>`);
     return;
   }

@@ -7,6 +7,11 @@ data/
 .coverage
 htmlcov/
 
+# local-only AI agent context (never commit / never push)
+agent.md
+AGENTS.md
+CLAUDE.md
+
 # cloudflared real config + credentials (keep only *.example.yml)
 deploy/cloudflared/config.yml
 deploy/cloudflared/*.json
