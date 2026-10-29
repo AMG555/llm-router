@@ -15,3 +15,11 @@ CLAUDE.md
 # cloudflared real config + credentials (keep only *.example.yml)
 deploy/cloudflared/config.yml
 deploy/cloudflared/*.json
+
+# wrangler local artifacts + real worker config (has KV namespace id)
+deploy/cloudflare-worker/wrangler.toml
+deploy/cloudflare-worker/.wrangler/
+deploy/cloudflare-worker/.kv_id
+deploy/cloudflare-worker/.token
+deploy/cloudflare-worker/.subdomain
+.wrangler/

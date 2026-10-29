@@ -17,8 +17,9 @@ export default {
         status: 404, headers: { "content-type": "application/json" },
       });
     }
-    const auth = request.headers.get("authorization") || "";
-    if (!env.AUTH_TOKEN || auth !== `Bearer ${env.AUTH_TOKEN}`) {
+    const auth = (request.headers.get("authorization") || "").trim();
+    const expected = "Bearer " + (env.AUTH_TOKEN || "").trim();
+    if (!env.AUTH_TOKEN || auth !== expected) {
       return new Response(JSON.stringify({ error: "unauthorized" }), {
         status: 401, headers: { "content-type": "application/json" },
       });
