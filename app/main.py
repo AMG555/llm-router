@@ -75,6 +75,7 @@ async def _load_bootstrap():
 
 
 _persist_status = {"at": 0.0, "ok": None, "error": ""}
+_bootstrap_status = {"url_set": None, "b64_set": None, "result": "not_run"}
 
 
 async def persist_config():
@@ -144,18 +145,23 @@ class PersistMiddleware:
 async def lifespan(app):
     bus.bind(asyncio.get_running_loop())
     if not store.providers:
-        log_event("info", "bootstrap_check", url_set=bool(settings.bootstrap_url),
-                  b64_set=bool(settings.bootstrap))
+        _bootstrap_status["url_set"] = bool(settings.bootstrap_url)
+        _bootstrap_status["b64_set"] = bool(settings.bootstrap)
         try:
             cfg = await _load_bootstrap()
             if cfg:
                 import_config(cfg)
+                _bootstrap_status["result"] = f"loaded:{len(store.providers)}"
                 log_event("info", "bootstrap_loaded", providers=len(store.providers))
             else:
+                _bootstrap_status["result"] = "empty"
                 log_event("info", "bootstrap_empty")
         except Exception as e:
+            _bootstrap_status["result"] = f"error: {str(e)[:160]}"
             print("bootstrap failed:", e)
             log_event("warn", "bootstrap_error", error=str(e)[:200])
+    else:
+        _bootstrap_status["result"] = "skipped_db_not_empty"
     if settings.gateway_key:
         if register_gateway_key(settings.gateway_key, "env"):
             print("[gateway] registered GATEWAY_KEY from environment")
@@ -551,7 +557,8 @@ async def admin_state(who=Depends(admin_auth)):
         "meta": {"env": settings.env, "encryption": store.box.enabled,
                  "gateway_rpm": settings.gateway_rpm,
                  "persistence": bool(settings.persist_url),
-                 "persist_status": _persist_status},
+                 "persist_status": _persist_status,
+                 "bootstrap": _bootstrap_status},
     }
 
 
@@ -951,6 +958,20 @@ async def stream(request: Request, ticket: str = "", token: str = ""):
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/admin/api/restore")
+async def restore_now(_=Depends(admin_auth)):
+    """Manually import config from BOOTSTRAP_URL/BOOTSTRAP_CONFIG now."""
+    try:
+        cfg = await _load_bootstrap()
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+    if not cfg:
+        return {"ok": False, "result": "empty"}
+    import_config(cfg)
+    _bootstrap_status["result"] = "loaded:manual"
+    return {"ok": True, "providers": len(store.providers), "models": len(store.vmodels)}
 
 
 @app.post("/admin/api/persist")

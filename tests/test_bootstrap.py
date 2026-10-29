@@ -60,6 +60,16 @@ def test_load_bootstrap_url_404_is_empty(app_module, upstream):
         settings.bootstrap, settings.bootstrap_url = old_c, old_u
 
 
+def test_restore_endpoint(client, admin_h):
+    r = client.post("/admin/api/restore", headers=admin_h)
+    assert r.status_code == 200 and "ok" in r.json()
+
+
+def test_state_reports_bootstrap(client, admin_h):
+    meta = client.get("/admin/api/state", headers=admin_h).json()["meta"]
+    assert "bootstrap" in meta
+
+
 def test_persist_now_endpoint(client, admin_h):
     r = client.post("/admin/api/persist", headers=admin_h)
     assert r.status_code == 200
