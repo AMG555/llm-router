@@ -72,8 +72,12 @@ async def _load_bootstrap():
     return None
 
 
+_persist_status = {"at": 0.0, "ok": None, "error": ""}
+
+
 async def persist_config():
     """PUT the full config to PERSIST_URL so it survives restarts."""
+    global _persist_status
     if not settings.persist_url:
         return
     try:
@@ -83,8 +87,10 @@ async def persist_config():
             headers["authorization"] = f"Bearer {settings.persist_token}"
         async with httpx.AsyncClient(timeout=15) as c:
             await c.put(settings.persist_url, json=data, headers=headers)
+        _persist_status = {"at": time.time(), "ok": True, "error": ""}
         log_event("info", "config_persisted")
     except Exception as e:
+        _persist_status = {"at": time.time(), "ok": False, "error": str(e)}
         log_event("warn", "config_persist_failed", error=str(e))
 
 
@@ -162,6 +168,10 @@ async def lifespan(app):
               cors=bool(settings.cors), gateway_rpm=settings.gateway_rpm,
               encryption=store.box.enabled)
     store.prune_logs(settings.max_log_rows)
+    # Seed the persistence store on boot if the DB already has data (e.g. a
+    # disk that survived) so an empty store gets populated automatically.
+    if settings.persist_url and store.providers:
+        await persist_config()
     try:
         yield
     finally:
@@ -532,7 +542,9 @@ async def admin_state(who=Depends(admin_auth)):
         "stats": _stats(),
         "health": health,
         "meta": {"env": settings.env, "encryption": store.box.enabled,
-                 "gateway_rpm": settings.gateway_rpm},
+                 "gateway_rpm": settings.gateway_rpm,
+                 "persistence": bool(settings.persist_url),
+                 "persist_status": _persist_status},
     }
 
 
@@ -932,6 +944,14 @@ async def stream(request: Request, ticket: str = "", token: str = ""):
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/admin/api/persist")
+async def persist_now(_=Depends(admin_auth)):
+    await persist_config()
+    return {"ok": _persist_status.get("ok"), "at": _persist_status.get("at"),
+            "error": _persist_status.get("error", ""),
+            "configured": bool(settings.persist_url)}
 
 
 @app.get("/admin/api/export")

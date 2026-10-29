@@ -273,6 +273,11 @@ const HANDLERS = {
   "toggle-entity": (el) => toggleEntity(el),
   "copy-base": () => copy(location.origin + "/v1", "Base URL copied"),
   "egress": () => probeEgress(),
+  "persist-now": () => api("/admin/api/persist", { method: "POST" }).then((r) => {
+    if (!r.configured) return toast("Persistence off", "Set PERSIST_URL to enable it.", "warn");
+    toast("Persist", r.ok ? "saved" : (r.error || "failed"), r.ok ? "ok" : "bad");
+    refresh();
+  }).catch(handleError),
 
   "add-key": (el) => newKeyModal(+el.dataset.id),
   "del-key": (el) => confirmDialog("Delete this key? In-flight requests continue.", { confirmLabel: "Delete" }).then((ok) => ok && api(`/admin/api/keys/${el.dataset.id}`, { method: "DELETE" }).then(refresh)),
@@ -788,6 +793,16 @@ function renderSettings() {
   $("#diagEnv").textContent = meta.env || "—";
   $("#diagEnc").textContent = meta.encryption ? "AES-256-GCM" : "plaintext (SECRET_KEY unset)";
   $("#diagRpm").textContent = meta.gateway_rpm ? meta.gateway_rpm + " rpm" : "unlimited";
+  const ps = meta.persist_status || {};
+  if (!meta.persistence) {
+    $("#diagPersist").innerHTML = '<span class="muted">off (ephemeral)</span>';
+  } else if (ps.ok === false) {
+    $("#diagPersist").innerHTML = '<span style="color:var(--bad)">on · error</span>';
+  } else if (ps.ok === true) {
+    $("#diagPersist").innerHTML = "on · saved " + esc(clockTime(ps.at));
+  } else {
+    $("#diagPersist").textContent = "on · pending";
+  }
   $("#diagIp").textContent = "click probe";
   const base = location.origin + "/v1";
   $("#baseUrl").textContent = base;

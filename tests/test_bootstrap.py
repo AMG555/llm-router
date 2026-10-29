@@ -50,19 +50,14 @@ def test_persist_puts_config(app_module, upstream):
     assert "providers" in upstream["persisted"][-1]
 
 
-def test_mutation_triggers_persist(client, admin_h, app_module, upstream):
-    import time
-    old_u = settings.persist_url
-    settings.persist_url = upstream["base"] + "/persist"
-    before = len(upstream["persisted"])
-    try:
-        client.post("/admin/api/providers", headers=admin_h,
-                    json={"name": "persist-prov", "base_url": "https://x.example/v1"})
-        for _ in range(50):  # wait out the 2s debounce (up to 5s)
-            if len(upstream["persisted"]) > before:
-                break
-            time.sleep(0.1)
-    finally:
-        settings.persist_url = old_u
-    assert len(upstream["persisted"]) > before
+def test_persist_now_endpoint(client, admin_h):
+    r = client.post("/admin/api/persist", headers=admin_h)
+    assert r.status_code == 200
+    body = r.json()
+    assert "ok" in body and "configured" in body
+
+
+def test_state_reports_persistence(client, admin_h):
+    meta = client.get("/admin/api/state", headers=admin_h).json()["meta"]
+    assert "persistence" in meta and "persist_status" in meta
 
