@@ -144,13 +144,18 @@ class PersistMiddleware:
 async def lifespan(app):
     bus.bind(asyncio.get_running_loop())
     if not store.providers:
+        log_event("info", "bootstrap_check", url_set=bool(settings.bootstrap_url),
+                  b64_set=bool(settings.bootstrap))
         try:
             cfg = await _load_bootstrap()
             if cfg:
                 import_config(cfg)
                 log_event("info", "bootstrap_loaded", providers=len(store.providers))
+            else:
+                log_event("info", "bootstrap_empty")
         except Exception as e:
             print("bootstrap failed:", e)
+            log_event("warn", "bootstrap_error", error=str(e)[:200])
     if settings.gateway_key:
         if register_gateway_key(settings.gateway_key, "env"):
             print("[gateway] registered GATEWAY_KEY from environment")
